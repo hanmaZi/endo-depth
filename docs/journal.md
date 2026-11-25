@@ -74,3 +74,17 @@ Ce journal trace chronologiquement ce qui a été fait, les choix techniques pri
 ## 25 novembre 2026 — Cause exacte de l'absence de `cecum_t1_a` résolue
 - **Constat (via diagnostic dossier) :** Dans `cecum_t1_a`, les images couleur ne sont **pas** paddées sur 4 chiffres (`0_color.png`, `9_color.png`, ..., `99_color.png`, ..., `275_color.png`), alors que les cartes de profondeur/normales/occlusion le sont (`0000_depth.tiff`, `0009_depth.tiff`, ..., `0275_depth.tiff`).
 - **Correction :** [`_extract_frame_id_candidates`](../src/datasets/c3vd.py) génère désormais les variantes paddées (`zfill(4..6)`) et non paddées, et [`discover_c3vd_records`](../src/datasets/c3vd.py) trie les paires par `(sequence_name, frame_id)` (testé localement sur `0_color.png..11_color.png` + `0000_depth.tiff..0011_depth.tiff`).
+
+## 25–26 novembre 2026 — Premiers résultats Colab T4 (Lot 1 C3VD) et corrections v2
+- **Protocole réel Colab T4 (Lot 1) :** `cecum_t1_a` (train, 276 images), `desc_t4_a` (val, 148 images), `trans_t1_a` (test, 61 images), alignement médian par frame (`align_mode: "median"`, `eval_test_median.json`).
+- **Résultats mesurés sur `trans_t1_a` (61 images test) :**
+  - `Zero-Shot DAV2-Small` : `AbsRel = 0.379189`, `SqRel = 3.155410`, `RMSE = 8.462212`, `RMSE_log = 0.407756`, `δ < 1.25 = 0.475590`.
+  - `Baseline LoRA (L1+SiLog)` (`v1`) : `AbsRel = 0.163542`, `SqRel = 1.096292`, `RMSE = 7.446611`, `RMSE_log = 0.209548`, `δ < 1.25 = 0.739860`, `δ < 1.25² = 0.955987`, `δ < 1.25³ = 0.992991`.
+  - `Contrib LoRA + Grad/Norm` (`v1`) : `AbsRel = 0.167094`, `SqRel = 1.308990`, `RMSE = 8.464066`, `RMSE_log = 0.221717`, `δ < 1.25 = 0.732430`, `δ < 1.25² = 0.941260`, `δ < 1.25³ = 0.987169`.
+- **Diagnostic des causes racines :**
+  1. **Surapprentissage précoce après les époques 1–2 :** Le split train ne contient qu'une seule séquence sombre (`cecum_t1_a`), tandis que `train_neck: true` libère 2 875 971 paramètres (11,54 % du modèle) à `lr = 1e-4` avec seul flip horizontal — `val_AbsRel` sur `desc_t4_a` remonte ensuite de ~0.165–0.169 (époques 1–2) vers ~0.205–0.215 (époque 15).
+  2. **Décalage modèle fisheye Scaramuzza vs normales pinhole (`RMSE` 8.464 vs 7.447) :** C3VD utilise une calibration omnidirectionnelle Scaramuzza ; comparer des normales issues d'une formule pinhole (`fx = W`) aux `*_normals.tiff` GT produit une perte non nulle même quand `pred_depth == target_depth`.
+- **Correctifs appliqués (`v2`, nouveaux `experiment_name` pour ne pas écraser ni reprendre les checkpoints `v1`) :**
+  1. [`BaseEndoscopyDataset`](../src/datasets/base.py) (`color_augment: true`) : jitter photométrique multiplicatif (gamma, luminosité, gains RGB) préservant à `0` les coins noirs du masque endoscopique.
+  2. [`MultiScaleGradientLoss`](../src/losses/depth_losses.py) (`use_log: true`) et [`SurfaceNormalLoss`](../src/losses/depth_losses.py) (`use_gt_normals: false`, `w_normal: 0.25`) : gradients multi-échelles sur `log(depth)` et cohérence des normales 3D extraites symétriquement de `pred_depth` et `target_depth`.
+  3. [`c3vd_lora_baseline.yaml`](../configs/c3vd_lora_baseline.yaml) et [`c3vd_lora_grad_norm.yaml`](../configs/c3vd_lora_grad_norm.yaml) (`*_v2`) + [`src/train.py`](../src/train.py) : `train_neck: false`, `epochs: 12`, `learning_rate: 5.0e-5`, `weight_decay: 1.0e-2`, `lr_scheduler: "cosine"`.

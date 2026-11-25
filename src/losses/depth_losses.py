@@ -79,16 +79,18 @@ class SiLogLoss(nn.Module):
 class MultiScaleGradientLoss(nn.Module):
     """Perte L1 multi-échelles sur les gradients spatiaux (dx, dy) pour préserver les bords."""
 
-    def __init__(self, num_scales: int = 3) -> None:
+    def __init__(self, num_scales: int = 3, use_log: bool = True, eps: float = 1e-3) -> None:
         super().__init__()
         self.num_scales = int(num_scales)
+        self.use_log = bool(use_log)
+        self.eps = float(eps)
 
     def forward(
         self, pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor
     ) -> torch.Tensor:
         total = pred.sum() * 0.0
-        p = pred
-        gt = target
+        p = torch.log(pred.clamp(min=self.eps)) if self.use_log else pred
+        gt = torch.log(target.clamp(min=self.eps)) if self.use_log else target
         m = mask.float()
 
         for scale in range(self.num_scales):
@@ -120,12 +122,23 @@ class MultiScaleGradientLoss(nn.Module):
 
 
 class SurfaceNormalLoss(nn.Module):
-    """Perte cosinus (1 - cos_sim) entre normales issues de la profondeur prédite et normales cibles."""
+    """Perte cosinus (1 - cos_sim) entre normales issues de la profondeur prédite et normales cibles.
 
-    def __init__(self, fx: float | None = None, fy: float | None = None) -> None:
+    Par défaut (`use_gt_normals=False`), calcule les normales cibles depuis `target_depth` avec
+    le même opérateur `depth_to_normals` : cela garantit loss=0 quand pred==target même pour
+    des caméras grand-angle / omnidirectionnelles (modèle Scaramuzza sur C3VD).
+    """
+
+    def __init__(
+        self,
+        fx: float | None = None,
+        fy: float | None = None,
+        use_gt_normals: bool = False,
+    ) -> None:
         super().__init__()
         self.fx = fx
         self.fy = fy
+        self.use_gt_normals = bool(use_gt_normals)
 
     def forward(
         self,
@@ -138,7 +151,7 @@ class SurfaceNormalLoss(nn.Module):
         pred_normals = depth_to_normals(pred_depth, fx=self.fx, fy=self.fy)
         pseudo_normals = depth_to_normals(target_depth, fx=self.fx, fy=self.fy)
 
-        if target_normals is not None and has_normals is not None:
+        if self.use_gt_normals and target_normals is not None and has_normals is not None:
             if isinstance(has_normals, bool):
                 gt_normals = target_normals if has_normals else pseudo_normals
                 using_gt_normals = torch.full(
@@ -189,6 +202,8 @@ class EndoDepthLoss(nn.Module):
         w_grad: float = 0.5,
         w_normal: float = 0.5,
         grad_scales: int = 3,
+        use_log_grad: bool = True,
+        use_gt_normals: bool = False,
         fx: float | None = None,
         fy: float | None = None,
         min_depth_mm: float = 1.0,
@@ -203,8 +218,8 @@ class EndoDepthLoss(nn.Module):
         self.max_depth_mm = float(max_depth_mm) if max_depth_mm is not None else None
 
         self.silog = SiLogLoss()
-        self.grad = MultiScaleGradientLoss(num_scales=grad_scales)
-        self.normal = SurfaceNormalLoss(fx=fx, fy=fy)
+        self.grad = MultiScaleGradientLoss(num_scales=grad_scales, use_log=use_log_grad)
+        self.normal = SurfaceNormalLoss(fx=fx, fy=fy, use_gt_normals=use_gt_normals)
 
     def forward(
         self,
@@ -262,6 +277,8 @@ def build_loss_from_config(config: dict[str, Any]) -> EndoDepthLoss:
         w_grad=float(loss_cfg.get("w_grad", 0.5)),
         w_normal=float(loss_cfg.get("w_normal", 0.5)),
         grad_scales=int(loss_cfg.get("grad_scales", 3)),
+        use_log_grad=bool(loss_cfg.get("use_log_grad", True)),
+        use_gt_normals=bool(loss_cfg.get("use_gt_normals", False)),
         fx=loss_cfg.get("fx"),
         fy=loss_cfg.get("fy"),
         min_depth_mm=float(data_cfg.get("min_depth_mm", 1.0)),

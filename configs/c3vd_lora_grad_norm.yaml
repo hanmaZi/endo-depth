@@ -1,13 +1,13 @@
 # Contribution PFE : LoRA sur Depth-Anything-V2-Small + Loss Gradients & Normales
 
-experiment_name: "c3vd_lora_grad_norm"
+experiment_name: "c3vd_lora_grad_norm_v2"
 seed: 42
 device: "auto"
 
 paths:
   data_dir: "data"
   results_dir: "results"
-  checkpoint_dir: "results/c3vd_lora_grad_norm/checkpoints"
+  checkpoint_dir: "results/c3vd_lora_grad_norm_v2/checkpoints"
 
 data:
   dataset_name: "c3vd"
@@ -22,13 +22,14 @@ data:
   batch_size: 4
   num_workers: 2
   augment: true
+  color_augment: true
 
 model:
   name: "depth_anything_v2_lora"
   pretrained_id: "depth-anything/Depth-Anything-V2-Small-hf"
   mode: "metric"
   use_lora: true
-  train_neck: true
+  train_neck: false
   train_head: true
   lora:
     rank: 8
@@ -39,16 +40,19 @@ model:
 loss:
   w_l1: 1.0
   w_silog: 1.0
-  w_grad: 0.5                # Préserve les bords des polypes et des plis muqueux
-  w_normal: 0.5              # Cohérence des normales 3D de surface (C3VD)
+  w_grad: 0.5                # Préserve les bords des polypes et des plis muqueux (en log-profondeur)
+  w_normal: 0.25             # Cohérence des normales 3D extraites de pred vs target
   grad_scales: 3
+  use_log_grad: true         # Gradients spatiaux sur log(depth) (cohérent avec SiLog)
+  use_gt_normals: false      # Évite le biais fisheye Scaramuzza (C3VD) vs opérateur pinhole
   fx: null                   # Si null, approximation proportionnelle à la largeur image
   fy: null
 
 training:
-  epochs: 15
-  learning_rate: 1.0e-4
-  weight_decay: 1.0e-4
+  epochs: 12
+  learning_rate: 5.0e-5
+  weight_decay: 1.0e-2
+  lr_scheduler: "cosine"
   use_amp: true
   grad_clip_norm: 1.0
   save_every_n_epochs: 1

@@ -88,6 +88,7 @@ def build_dataset(config: dict[str, Any], split: str) -> C3VDDataset | SimCol3DD
         "test_ratio": float(data_cfg.get("test_ratio", 0.15)),
         "seed": int(config.get("seed", 42)),
         "augment": (split == "train") and bool(data_cfg.get("augment", True)),
+        "color_augment": (split == "train") and bool(data_cfg.get("color_augment", False)),
         "sequence_splits": data_cfg.get("sequence_splits"),
     }
 

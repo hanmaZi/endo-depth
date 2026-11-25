@@ -90,6 +90,7 @@ class SimCol3DDataset(BaseEndoscopyDataset):
         test_ratio: float = 0.15,
         seed: int = 42,
         augment: bool = False,
+        color_augment: bool = False,
         sequence_splits: dict[str, list[str]] | None = None,
     ) -> None:
         self.depth_max_mm = float(depth_max_mm)
@@ -108,6 +109,7 @@ class SimCol3DDataset(BaseEndoscopyDataset):
             min_depth_mm=min_depth_mm,
             max_depth_mm=max_depth_mm,
             augment=augment,
+            color_augment=color_augment,
         )
 
     def _decode_depth_mm(self, record: SampleRecord) -> np.ndarray:

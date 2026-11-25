@@ -9,6 +9,7 @@ Exemples :
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 from typing import Any
 
@@ -221,11 +222,25 @@ def run_training(
 
     criterion = build_loss_from_config(config)
     trainable_list = [p for p in model.parameters() if p.requires_grad]
+    base_lr = float(train_cfg.get("learning_rate", 1e-4))
+    epochs = int(train_cfg.get("epochs", 10))
     optimizer = torch.optim.AdamW(
         trainable_list,
-        lr=float(train_cfg.get("learning_rate", 1e-4)),
+        lr=base_lr,
         weight_decay=float(train_cfg.get("weight_decay", 1e-4)),
     )
+    scheduler_name = str(train_cfg.get("lr_scheduler") or "none").lower()
+    t_max = max(epochs, 1)
+    eta_min = base_lr * 0.1
+    scheduler = None
+    if scheduler_name == "cosine":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=t_max,
+            eta_min=eta_min,
+        )
+    elif scheduler_name not in {"none", ""}:
+        raise ValueError(f"lr_scheduler non supporté : {scheduler_name}")
 
     use_amp = bool(train_cfg.get("use_amp", True)) and device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda") if use_amp else None
@@ -253,9 +268,21 @@ def run_training(
                 loaded_hist = json.load(handle)
                 if isinstance(loaded_hist, list):
                     history = [h for h in loaded_hist if int(h.get("epoch", 0)) < start_epoch]
+        if scheduler is not None and start_epoch > 1:
+            completed = min(start_epoch - 1, t_max)
+            resumed_lr = eta_min + 0.5 * (base_lr - eta_min) * (1.0 + math.cos(math.pi * completed / t_max))
+            n_groups = len(optimizer.param_groups)
+            for group in optimizer.param_groups:
+                group["lr"] = resumed_lr
+            scheduler.load_state_dict(
+                {
+                    "base_lrs": [base_lr] * n_groups,
+                    "last_epoch": completed,
+                    "_step_count": completed + 1,
+                    "_last_lr": [resumed_lr] * n_groups,
+                }
+            )
         print(f"[Info] Reprise depuis {resume_path} à l'époque {start_epoch} (best_abs_rel={best_val_abs_rel:.4f})")
-
-    epochs = int(train_cfg.get("epochs", 10))
     save_every = max(1, int(train_cfg.get("save_every_n_epochs", 1)))
     min_depth = float(eval_cfg.get("min_depth", data_cfg.get("min_depth_mm", 1.0)))
     max_depth = float(eval_cfg.get("max_depth", data_cfg.get("max_depth_mm", 100.0)))
@@ -332,6 +359,9 @@ def run_training(
             f"val_AbsRel={val_abs_rel:.4f}, val_RMSE={val_metrics.get('rmse', 0.0):.3f}, "
             f"val_d1={val_metrics.get('delta_1', 0.0):.4f}"
         )
+
+        if scheduler is not None:
+            scheduler.step()
 
         if val_abs_rel < best_val_abs_rel:
             best_val_abs_rel = val_abs_rel

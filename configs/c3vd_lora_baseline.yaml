@@ -1,13 +1,13 @@
 # Baseline reproductible : fine-tuning LoRA sur Depth-Anything-V2-Small (L1 + SiLog)
 
-experiment_name: "c3vd_lora_baseline"
+experiment_name: "c3vd_lora_baseline_v2"
 seed: 42
 device: "auto"
 
 paths:
   data_dir: "data"
   results_dir: "results"
-  checkpoint_dir: "results/c3vd_lora_baseline/checkpoints"
+  checkpoint_dir: "results/c3vd_lora_baseline_v2/checkpoints"
 
 data:
   dataset_name: "c3vd"
@@ -22,13 +22,14 @@ data:
   batch_size: 4
   num_workers: 2
   augment: true
+  color_augment: true
 
 model:
   name: "depth_anything_v2_lora"
   pretrained_id: "depth-anything/Depth-Anything-V2-Small-hf"
   mode: "metric"
   use_lora: true
-  train_neck: true
+  train_neck: false
   train_head: true
   lora:
     rank: 8
@@ -43,9 +44,10 @@ loss:
   w_normal: 0.0              # Désactivé dans la baseline pure
 
 training:
-  epochs: 15
-  learning_rate: 1.0e-4
-  weight_decay: 1.0e-4
+  epochs: 12
+  learning_rate: 5.0e-5
+  weight_decay: 1.0e-2
+  lr_scheduler: "cosine"
   use_amp: true              # Précision mixte FP16 sur GPU T4
   grad_clip_norm: 1.0
   save_every_n_epochs: 1     # Sauvegarde chaque époque (coupures Colab)

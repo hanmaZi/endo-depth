@@ -162,12 +162,14 @@ class BaseEndoscopyDataset(Dataset):
         min_depth_mm: float = 1.0,
         max_depth_mm: float = 200.0,
         augment: bool = False,
+        color_augment: bool = False,
     ) -> None:
         self.records = records
         self.height, self.width = int(image_size[0]), int(image_size[1])
         self.min_depth_mm = float(min_depth_mm)
         self.max_depth_mm = float(max_depth_mm)
         self.augment = augment
+        self.color_augment = color_augment
 
     def __len__(self) -> int:
         return len(self.records)
@@ -251,7 +253,18 @@ class BaseEndoscopyDataset(Dataset):
 
         specular_mask = detect_specular_mask(rgb_resized, valid_mask=valid_mask)
 
-        image_tensor = torch.from_numpy(rgb_resized.transpose(2, 0, 1)).float() / 255.0
+        # Augmentation photométrique (luminosité/gamma/teinte) pour limiter le surapprentissage couleur
+        rgb_float = rgb_resized.astype(np.float32) / 255.0
+        if self.augment and self.color_augment and random.random() < 0.8:
+            gamma = random.uniform(0.75, 1.35)
+            brightness = random.uniform(0.75, 1.25)
+            channel_gains = np.array(
+                [random.uniform(0.88, 1.12), random.uniform(0.88, 1.12), random.uniform(0.88, 1.12)],
+                dtype=np.float32,
+            ).reshape(1, 1, 3)
+            rgb_float = np.clip((rgb_float ** gamma) * brightness * channel_gains, 0.0, 1.0)
+
+        image_tensor = torch.from_numpy(rgb_float.transpose(2, 0, 1)).float()
         depth_tensor = torch.from_numpy(depth_resized).unsqueeze(0).float()
         mask_tensor = torch.from_numpy(valid_mask).unsqueeze(0).bool()
         normals_tensor = torch.from_numpy(normals_resized.transpose(2, 0, 1)).float()
