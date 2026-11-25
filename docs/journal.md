@@ -45,3 +45,7 @@ Ce journal trace chronologiquement ce qui a été fait, les choix techniques pri
 - **Blocage / Action requise côté utilisateur :**
   1. Télécharger les séquences C3VD (ou SimCol3D) dans Google Drive (aucun téléchargement automatique effectué).
   2. Exécuter [`01_dataset_viz.ipynb`](../notebooks/01_dataset_viz.ipynb), [`02_baseline_zeroshot.ipynb`](../notebooks/02_baseline_zeroshot.ipynb) puis [`03_train_lora_contrib.ipynb`](../notebooks/03_train_lora_contrib.ipynb) sur GPU Colab T4 (« Tout exécuter »).
+
+## 25 novembre 2026 — Mise à jour : Préparation mixte `c3vd_zips/` (.zip + dossiers) vers `/content/data/c3vd`
+- **Fait :** Ajout de [`prepare_c3vd_from_source`](../src/datasets/c3vd.py) et [`resolve_dataset_dir`](../src/datasets/factory.py), et mise à jour des notebooks `01`, `02`, `03` pour traiter uniformément archives `.zip` (extraction) et dossiers déjà décompressés (copie) depuis `MyDrive/endo-depth/data/c3vd_zips/` vers `/content/data/c3vd/<sequence>/`, avec suppression des doubles imbrications éventuelles et skip si déjà préparé.
+- **Vérifications :** Test local avec mélange de `.zip` plats/imbriqués et dossiers plats/doublement imbriqués + validation `nbformat` des 3 notebooks : tout passe.

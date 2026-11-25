@@ -8,7 +8,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from src.datasets.c3vd import C3VDDataset
+from src.datasets.c3vd import C3VDDataset, prepare_c3vd_from_source
 from src.datasets.simcol3d import SimCol3DDataset
 
 
@@ -96,3 +96,46 @@ def build_dataset(config: dict[str, Any], split: str) -> C3VDDataset | SimCol3DD
         common_kwargs["depth_max_mm"] = float(data_cfg.get("depth_max_mm", 200.0))
         return SimCol3DDataset(**common_kwargs)
     raise ValueError(f"Dataset '{name}' non supporté par build_dataset (attendu: c3vd, simcol3d).")
+
+
+def resolve_dataset_dir(
+    dataset_name: str,
+    drive_data_base: str | Path,
+    local_data_base: str | Path,
+    demo_fallback_dir: str | Path,
+    num_demo_sequences: int = 4,
+    frames_per_seq: int = 6,
+) -> tuple[Path, str, bool]:
+    """Résout le dossier du dataset depuis Drive/local (y compris c3vd_zips mixte zip+dossiers).
+
+    Retourne `(dataset_dir, effective_dataset_name, is_synthetic_demo)`.
+    """
+    drive_base = Path(drive_data_base)
+    local_base = Path(local_data_base)
+    name = dataset_name.lower()
+
+    if name == "c3vd":
+        zips_dir = drive_base / "c3vd_zips"
+        raw_dir = drive_base / "c3vd"
+        target_dir = local_base / "c3vd"
+
+        if zips_dir.is_dir() and any(zips_dir.iterdir()):
+            prepare_c3vd_from_source(zips_dir, target_dir)
+            return target_dir, "c3vd", False
+        if raw_dir.is_dir() and any(raw_dir.iterdir()):
+            if raw_dir.resolve() != target_dir.resolve():
+                prepare_c3vd_from_source(raw_dir, target_dir)
+                return target_dir, "c3vd", False
+            return raw_dir, "c3vd", False
+
+    else:
+        candidate = drive_base / name
+        if candidate.is_dir() and any(candidate.iterdir()):
+            return candidate, name, False
+
+    demo_dir = create_synthetic_c3vd_demo(
+        demo_fallback_dir,
+        num_sequences=num_demo_sequences,
+        frames_per_seq=frames_per_seq,
+    )
+    return demo_dir, "c3vd", True
