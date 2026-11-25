@@ -67,6 +67,6 @@ Ouvre [`notebooks/00_smoke_test.ipynb`](notebooks/00_smoke_test.ipynb) dans Goog
 
 - [x] **Étape A** : Mise en place du dépôt, environnement, config YAML et smoke tests CPU/GPU
 - [x] **Étape B** : État de l'art ([`docs/etat_de_l_art.md`](docs/etat_de_l_art.md))
-- [ ] **Étape C** : Préparation et visualisation des datasets endoscopiques
+- [x] **Étape C** : Préparation et visualisation des datasets endoscopiques ([`docs/datasets.md`](docs/datasets.md), [`notebooks/01_dataset_viz.ipynb`](notebooks/01_dataset_viz.ipynb))
 - [ ] **Étape D** : Baseline reproductible (zero-shot + fine-tuning)
 - [x] **Étape E** : Plan d'apprentissage ciblé ([`docs/plan_apprentissage.md`](docs/plan_apprentissage.md))
