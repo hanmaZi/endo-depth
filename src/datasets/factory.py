@@ -100,41 +100,81 @@ def build_dataset(config: dict[str, Any], split: str) -> C3VDDataset | SimCol3DD
     raise ValueError(f"Dataset '{name}' non supporté par build_dataset (attendu: c3vd, simcol3d).")
 
 
+def _find_subdir_bounded(root: Path, target_names: tuple[str, ...], max_depth: int = 3) -> list[Path]:
+    """Cherche des sous-dossiers non vides portant un nom donné jusqu'à une profondeur max."""
+    matches: list[Path] = []
+    if not root.is_dir():
+        return matches
+
+    def _walk(current: Path, depth: int) -> None:
+        if depth > max_depth:
+            return
+        try:
+            entries = sorted(current.iterdir())
+        except OSError:
+            return
+        for entry in entries:
+            if not entry.is_dir() or entry.name.startswith("."):
+                continue
+            if entry.name.lower() in target_names and any(entry.iterdir()):
+                matches.append(entry)
+            elif depth < max_depth:
+                _walk(entry, depth + 1)
+
+    _walk(root, 1)
+    return matches
+
+
 def resolve_dataset_dir(
     dataset_name: str,
     drive_data_base: str | Path,
     local_data_base: str | Path,
     demo_fallback_dir: str | Path,
     expected_sequences: list[str] | tuple[str, ...] | None = None,
+    allow_demo_fallback: bool | None = None,
     num_demo_sequences: int = 4,
     frames_per_seq: int = 6,
 ) -> tuple[Path, str, bool]:
     """Résout le dossier du dataset depuis Drive/local (y compris c3vd_zips mixte zip+dossiers).
 
-    Retourne `(dataset_dir, effective_dataset_name, is_synthetic_demo)`.
+    Si `expected_sequences` est fourni et `allow_demo_fallback` n'est pas forcé à True,
+    échoue explicitement si aucun dataset réel n'est trouvé au lieu de basculer en démo.
     """
     drive_base = Path(drive_data_base)
     local_base = Path(local_data_base)
     name = dataset_name.lower()
+    if allow_demo_fallback is None:
+        allow_demo_fallback = not bool(expected_sequences)
 
     if name == "c3vd":
         zips_dir = drive_base / "c3vd_zips"
         raw_dir = drive_base / "c3vd"
         target_dir = local_base / "c3vd"
-        found_real = False
+        source_dirs: list[Path] = []
 
         if zips_dir.is_dir() and any(zips_dir.iterdir()):
-            prepare_c3vd_from_source(zips_dir, target_dir)
-            found_real = True
-
+            source_dirs.append(zips_dir)
         if raw_dir.is_dir() and any(raw_dir.iterdir()):
-            if raw_dir.resolve() != target_dir.resolve():
-                prepare_c3vd_from_source(raw_dir, target_dir)
-            else:
-                target_dir = raw_dir
-            found_real = True
+            source_dirs.append(raw_dir)
 
-        if found_real:
+        # Recherche bornée dans MyDrive si placé dans un autre sous-dossier (ex. PFE/endo-depth/data)
+        if not source_dirs:
+            mydrive_root = Path("/content/drive/MyDrive")
+            if not mydrive_root.is_dir():
+                for parent in drive_base.parents:
+                    if parent.name == "MyDrive":
+                        mydrive_root = parent
+                        break
+            if mydrive_root.is_dir():
+                found_alt = _find_subdir_bounded(mydrive_root, ("c3vd_zips", "c3vd"), max_depth=4)
+                if found_alt:
+                    print(f"[Auto-detect] Dossier(s) C3VD trouvé(s) dans MyDrive : {found_alt}")
+                    source_dirs.extend(found_alt)
+
+        if source_dirs:
+            for src_dir in source_dirs:
+                if src_dir.resolve() != target_dir.resolve():
+                    prepare_c3vd_from_source(src_dir, target_dir)
             discover_c3vd_records(target_dir, expected_sequences=expected_sequences)
             return target_dir, "c3vd", False
 
@@ -142,6 +182,18 @@ def resolve_dataset_dir(
         candidate = drive_base / name
         if candidate.is_dir() and any(candidate.iterdir()):
             return candidate, name, False
+
+    if not allow_demo_fallback:
+        mydrive_listing: list[str] = []
+        mydrive = Path("/content/drive/MyDrive")
+        if mydrive.is_dir():
+            mydrive_listing = sorted(p.name for p in mydrive.iterdir() if not p.name.startswith("."))[:20]
+        raise FileNotFoundError(
+            f"Aucune donnée réelle '{name}' trouvée sous {drive_base} "
+            f"(attendu : {expected_sequences}). "
+            f"Dossiers visibles dans MyDrive : {mydrive_listing}. "
+            "Vérifie le chemin Drive ou mets EXPECTED_SEQUENCES = [] pour tester en mode démo."
+        )
 
     demo_dir = create_synthetic_c3vd_demo(
         demo_fallback_dir,
