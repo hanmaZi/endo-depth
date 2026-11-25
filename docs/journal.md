@@ -70,3 +70,7 @@ Ce journal trace chronologiquement ce qui a été fait, les choix techniques pri
   1. **Priorité au code GitHub dans `01`, `02`, `03`** : `REPO_URL = "https://github.com/hanmaZi/endo-depth.git"` est pré-rempli et cloné/mis à jour dans `/content/endo-depth` avant d'utiliser un éventuel `src/` sur Drive.
   2. **Auto-détection bornée dans `MyDrive`** : [`resolve_dataset_dir`](../src/datasets/factory.py) cherche `c3vd_zips` / `c3vd` jusqu'à 4 niveaux dans `MyDrive` si absent du chemin par défaut.
   3. **Interdiction de bascule silencieuse en démo** : lorsque `expected_sequences` est renseigné, `resolve_dataset_dir` lève `FileNotFoundError` (avec liste des dossiers visibles dans `MyDrive`) au lieu de générer `demo_seq_1..4`.
+
+## 25 novembre 2026 — Cause exacte de l'absence de `cecum_t1_a` résolue
+- **Constat (via diagnostic dossier) :** Dans `cecum_t1_a`, les images couleur ne sont **pas** paddées sur 4 chiffres (`0_color.png`, `9_color.png`, ..., `99_color.png`, ..., `275_color.png`), alors que les cartes de profondeur/normales/occlusion le sont (`0000_depth.tiff`, `0009_depth.tiff`, ..., `0275_depth.tiff`).
+- **Correction :** [`_extract_frame_id_candidates`](../src/datasets/c3vd.py) génère désormais les variantes paddées (`zfill(4..6)`) et non paddées, et [`discover_c3vd_records`](../src/datasets/c3vd.py) trie les paires par `(sequence_name, frame_id)` (testé localement sur `0_color.png..11_color.png` + `0000_depth.tiff..0011_depth.tiff`).

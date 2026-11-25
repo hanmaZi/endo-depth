@@ -42,22 +42,33 @@ def _summarize_dir_contents(folder: Path) -> str:
 
 
 def _extract_frame_id_candidates(stem: str) -> list[str]:
-    """Génère les identifiants de frame possibles depuis un nom de fichier RGB."""
-    candidates: list[str] = [stem]
+    """Génère les identifiants de frame possibles depuis un nom de fichier RGB (ex. 9_color -> 0009)."""
+    base_candidates: list[str] = [stem]
     for suffix in ("_color", "_rgb", "_img", "_image", "_undistorted"):
         if stem.lower().endswith(suffix):
-            candidates.append(stem[: -len(suffix)])
+            base_candidates.append(stem[: -len(suffix)])
     for prefix in ("color_", "rgb_", "frame_", "img_", "image_"):
         if stem.lower().startswith(prefix):
-            candidates.append(stem[len(prefix) :])
+            base_candidates.append(stem[len(prefix) :])
     digit_match = re.search(r"(\d+)$", stem)
     if digit_match:
-        candidates.append(digit_match.group(1))
+        base_candidates.append(digit_match.group(1))
     any_digits = re.search(r"(\d+)", stem)
     if any_digits:
-        candidates.append(any_digits.group(1))
+        base_candidates.append(any_digits.group(1))
+
+    expanded: list[str] = []
+    for cand in base_candidates:
+        if not cand:
+            continue
+        expanded.append(cand)
+        if cand.isdigit():
+            num_str = str(int(cand))
+            for width in (4, 5, 6):
+                expanded.append(num_str.zfill(width))
+            expanded.append(num_str)
     # Déduplique tout en conservant l'ordre de priorité
-    return list(dict.fromkeys(c for c in candidates if c))
+    return list(dict.fromkeys(expanded))
 
 
 def _unwrap_duplicate_seq_dir(seq_dir: Path) -> Path:
@@ -300,6 +311,8 @@ def discover_c3vd_records(
         raise RuntimeError(
             f"Aucune paire (RGB, profondeur) trouvée dans {root} ({_summarize_dir_contents(root)})."
         )
+
+    records.sort(key=lambda r: (r.sequence_name, r.frame_id))
 
     if expected_sequences is not None:
         counts = summarize_records_by_sequence(records)
