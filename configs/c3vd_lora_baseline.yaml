@@ -1,0 +1,57 @@
+# Baseline reproductible : fine-tuning LoRA sur Depth-Anything-V2-Small (L1 + SiLog)
+
+experiment_name: "c3vd_lora_baseline"
+seed: 42
+device: "auto"
+
+paths:
+  data_dir: "data"
+  results_dir: "results"
+  checkpoint_dir: "results/c3vd_lora_baseline/checkpoints"
+
+data:
+  dataset_name: "c3vd"
+  dataset_path: null
+  image_size: [252, 252]     # Multiple de 14 (patch_size DINOv2)
+  min_depth_mm: 1.0
+  max_depth_mm: 100.0
+  val_ratio: 0.15
+  test_ratio: 0.15
+  batch_size: 4
+  num_workers: 2
+  augment: true
+
+model:
+  name: "depth_anything_v2_lora"
+  pretrained_id: "depth-anything/Depth-Anything-V2-Small-hf"
+  mode: "metric"
+  use_lora: true
+  train_neck: true
+  train_head: true
+  lora:
+    rank: 8
+    alpha: 16.0
+    dropout: 0.05
+    targets: ["q_proj", "v_proj"]
+
+loss:
+  w_l1: 1.0
+  w_silog: 1.0
+  w_grad: 0.0                # Désactivé dans la baseline pure
+  w_normal: 0.0              # Désactivé dans la baseline pure
+
+training:
+  epochs: 15
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  use_amp: true              # Précision mixte FP16 sur GPU T4
+  grad_clip_norm: 1.0
+  save_every_n_epochs: 1     # Sauvegarde chaque époque (coupures Colab)
+  resume_from: null
+
+evaluation:
+  split: "test"
+  pred_is_disparity: false
+  align_mode: "median"       # Évaluation avec alignement médian (et brute si align_mode="none")
+  min_depth: 1.0
+  max_depth: 100.0

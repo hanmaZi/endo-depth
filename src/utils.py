@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import random
 from pathlib import Path
@@ -58,17 +59,38 @@ def save_checkpoint(
     optimizer: torch.optim.Optimizer,
     epoch: int,
     loss: float,
+    best_metric: float | None = None,
 ) -> Path:
     """Sauvegarde un checkpoint léger pour reprendre après une coupure Colab/Kaggle."""
     path = Path(checkpoint_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
+    payload: dict[str, Any] = {
         "epoch": int(epoch),
         "loss": float(loss),
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
     }
+    if best_metric is not None:
+        payload["best_metric"] = float(best_metric)
     torch.save(payload, path)
+    return path
+
+
+def save_json(data: Any, json_path: str | Path) -> Path:
+    """Enregistre un objet JSON lisible avec création automatique des dossiers parents."""
+    path = Path(json_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(data, handle, indent=2, ensure_ascii=False)
+    return path
+
+
+def save_config_copy(config: dict[str, Any], yaml_path: str | Path) -> Path:
+    """Sauvegarde la configuration effective d'une expérience pour la reproductibilité."""
+    path = Path(yaml_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(config, handle, sort_keys=False, allow_unicode=True)
     return path
 
 

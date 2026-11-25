@@ -1,0 +1,35 @@
+# Évaluation zero-shot de Depth-Anything-V2-Small sur C3VD (sans fine-tuning)
+
+experiment_name: "c3vd_zeroshot_dav2_small"
+seed: 42
+device: "auto"
+
+paths:
+  data_dir: "data"
+  results_dir: "results"
+  checkpoint_dir: "results/c3vd_zeroshot_dav2_small/checkpoints"
+
+data:
+  dataset_name: "c3vd"
+  dataset_path: null         # Utilise paths.data_dir / c3vd si null
+  image_size: [252, 252]     # Multiple de 14 (patch_size DINOv2)
+  min_depth_mm: 1.0
+  max_depth_mm: 100.0
+  val_ratio: 0.15
+  test_ratio: 0.15
+  batch_size: 4
+  num_workers: 2
+  augment: false
+
+model:
+  name: "depth_anything_v2_small"
+  pretrained_id: "depth-anything/Depth-Anything-V2-Small-hf"
+  mode: "zeroshot"
+  use_lora: false
+
+evaluation:
+  split: "test"
+  pred_is_disparity: true    # Depth-Anything-V2 zero-shot prédit une disparité relative
+  align_mode: "median"       # "median" (standard endo) ou "scale_shift"
+  min_depth: 1.0
+  max_depth: 100.0

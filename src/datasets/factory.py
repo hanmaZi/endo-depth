@@ -34,11 +34,11 @@ def create_synthetic_c3vd_demo(
             polyp_bump = 12.0 * np.exp(-((xx - 0.3 + shift) ** 2 + (yy + 0.1) ** 2) / 0.03)
             depth_mm = np.clip(75.0 - 55.0 * np.clip(radius, 0.0, 1.2) / 1.2 - polyp_bump, 5.0, 95.0)
 
-            # Normales analytiques approximatives (Nx, Ny, Nz) pointant vers la caméra (+Z ou -Z)
+            # Normales analytiques approximatives (Nx, Ny, Nz) pointant vers la caméra (-Z)
             dz_dy, dz_dx = np.gradient(depth_mm)
-            nx = -dz_dx / 15.0
-            ny = -dz_dy / 15.0
-            nz = np.ones_like(depth_mm)
+            nx = dz_dx / 15.0
+            ny = dz_dy / 15.0
+            nz = -np.ones_like(depth_mm)
             norm = np.sqrt(nx**2 + ny**2 + nz**2)
             normals_rgb = np.stack([nx / norm, ny / norm, nz / norm], axis=-1)
 
