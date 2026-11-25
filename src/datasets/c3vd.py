@@ -19,10 +19,17 @@ from src.datasets.base import (
 )
 
 
+_IGNORED_NAMES = {"__MACOSX", "desktop.ini", "Thumbs.db"}
+
+
+def _is_ignored_entry(path: Path) -> bool:
+    return path.name.startswith(".") or path.name in _IGNORED_NAMES
+
+
 def _unwrap_duplicate_seq_dir(seq_dir: Path) -> Path:
     """Évite les dossiers doublement imbriqués (ex. desc_t4_a/desc_t4_a/0000_color.png)."""
     nested = seq_dir / seq_dir.name
-    entries = [p for p in seq_dir.iterdir() if not p.name.startswith(".") and p.name != "__MACOSX"]
+    entries = [p for p in seq_dir.iterdir() if not _is_ignored_entry(p)]
     if len(entries) == 1 and entries[0] == nested and nested.is_dir():
         return nested
     return seq_dir
@@ -155,9 +162,21 @@ def prepare_c3vd_from_source(source_dir: str | Path, target_dir: str | Path) -> 
             if dest_seq.exists():
                 shutil.rmtree(dest_seq)
             shutil.move(str(tmp_copy), str(dest_seq))
+
+            # Si le dossier contenait en réalité un .zip non décompressé, l'extrait aussi
+            inner_zips = [p for p in dest_seq.glob("*.zip") if not _is_ignored_entry(p)]
+            if not _is_valid_c3vd_dir(dest_seq) and len(inner_zips) == 1:
+                inner_zip = inner_zips[0]
+                extracted = _extract_c3vd_zip(inner_zip, dst)
+                if extracted != dest_seq:
+                    dest_seq = extracted
+
             if not _is_valid_c3vd_dir(dest_seq):
+                all_files = sorted(p for p in dest_seq.rglob("*") if p.is_file())
+                sample_files = [str(p.relative_to(dest_seq)) for p in all_files[:15]]
                 raise RuntimeError(
-                    f"Le dossier copié {dest_seq} ne contient aucune paire RGB/profondeur valide."
+                    f"Le dossier copié {dest_seq} ne contient aucune paire RGB/profondeur valide "
+                    f"({len(all_files)} fichier(s) trouvé(s), exemples : {sample_files})."
                 )
             print(f"[Copy] {item.name}/ -> {dest_seq}")
             prepared.append(dest_seq)
@@ -171,32 +190,37 @@ def discover_c3vd_records(
     root_dir: str | Path,
     expected_sequences: Iterable[str] | None = None,
 ) -> list[SampleRecord]:
-    """Parcourt un dossier C3VD (plat, color/depth, rgb/depth, .tiff/.tif) et vérifie les séquences."""
+    """Parcourt un dossier C3VD (plat, color/depth, rgb/depth, NNNN.png, .tiff/.tif/.png)."""
     root = Path(root_dir)
     if not root.is_dir():
         raise FileNotFoundError(f"Dossier C3VD introuvable : {root}")
 
     candidates: list[tuple[Path, Path, str]] = []
     seen_rgb: set[Path] = set()
+    non_rgb_tags = ("mask", "occlusion", "depth", "normal", "flow", "edge")
 
     for rgb_path in sorted(root.rglob("*")):
         if not rgb_path.is_file():
             continue
         if "__MACOSX" in rgb_path.parts or any(part.startswith(".") for part in rgb_path.parts):
             continue
-        if rgb_path.suffix.lower() != ".png":
+        if rgb_path.suffix.lower() not in {".png", ".jpg", ".jpeg"}:
             continue
 
         stem_lower = rgb_path.stem.lower()
         parent_lower = rgb_path.parent.name.lower()
 
         if stem_lower.endswith("_color"):
-            seq_dir = rgb_path.parent.parent if parent_lower == "color" else rgb_path.parent
+            seq_dir = rgb_path.parent.parent if parent_lower in {"color", "rgb", "images"} else rgb_path.parent
             frame_id = rgb_path.stem[: -len("_color")]
-        elif parent_lower in {"color", "rgb"} and not any(
-            tag in stem_lower for tag in ("mask", "occlusion", "depth", "normal")
+        elif parent_lower in {"color", "rgb", "images"} and not any(
+            tag in stem_lower for tag in non_rgb_tags
         ):
             seq_dir = rgb_path.parent.parent
+            frame_id = rgb_path.stem
+        elif not any(tag in stem_lower for tag in non_rgb_tags):
+            # Supporte aussi les séquences C3VD nommées directement NNNN.png à côté de NNNN_depth.tiff
+            seq_dir = rgb_path.parent
             frame_id = rgb_path.stem
         else:
             continue
@@ -209,7 +233,11 @@ def discover_c3vd_records(
     records: list[SampleRecord] = []
     for rgb_path, seq_dir, frame_id in candidates:
         depth_path = _find_matching_map(
-            rgb_path, seq_dir, frame_id, kind="depth", extensions=(".tiff", ".tif", ".TIFF", ".TIF")
+            rgb_path,
+            seq_dir,
+            frame_id,
+            kind="depth",
+            extensions=(".tiff", ".tif", ".TIFF", ".TIF", ".png", ".PNG"),
         )
         if depth_path is None:
             continue
