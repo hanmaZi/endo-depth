@@ -8,7 +8,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from src.datasets.c3vd import C3VDDataset, prepare_c3vd_from_source
+from src.datasets.c3vd import C3VDDataset, discover_c3vd_records, prepare_c3vd_from_source
 from src.datasets.simcol3d import SimCol3DDataset
 
 
@@ -88,9 +88,11 @@ def build_dataset(config: dict[str, Any], split: str) -> C3VDDataset | SimCol3DD
         "test_ratio": float(data_cfg.get("test_ratio", 0.15)),
         "seed": int(config.get("seed", 42)),
         "augment": (split == "train") and bool(data_cfg.get("augment", True)),
+        "sequence_splits": data_cfg.get("sequence_splits"),
     }
 
     if name == "c3vd":
+        common_kwargs["expected_sequences"] = data_cfg.get("expected_sequences")
         return C3VDDataset(**common_kwargs)
     if name == "simcol3d":
         common_kwargs["depth_max_mm"] = float(data_cfg.get("depth_max_mm", 200.0))
@@ -103,6 +105,7 @@ def resolve_dataset_dir(
     drive_data_base: str | Path,
     local_data_base: str | Path,
     demo_fallback_dir: str | Path,
+    expected_sequences: list[str] | tuple[str, ...] | None = None,
     num_demo_sequences: int = 4,
     frames_per_seq: int = 6,
 ) -> tuple[Path, str, bool]:
@@ -118,15 +121,22 @@ def resolve_dataset_dir(
         zips_dir = drive_base / "c3vd_zips"
         raw_dir = drive_base / "c3vd"
         target_dir = local_base / "c3vd"
+        found_real = False
 
         if zips_dir.is_dir() and any(zips_dir.iterdir()):
             prepare_c3vd_from_source(zips_dir, target_dir)
-            return target_dir, "c3vd", False
+            found_real = True
+
         if raw_dir.is_dir() and any(raw_dir.iterdir()):
             if raw_dir.resolve() != target_dir.resolve():
                 prepare_c3vd_from_source(raw_dir, target_dir)
-                return target_dir, "c3vd", False
-            return raw_dir, "c3vd", False
+            else:
+                target_dir = raw_dir
+            found_real = True
+
+        if found_real:
+            discover_c3vd_records(target_dir, expected_sequences=expected_sequences)
+            return target_dir, "c3vd", False
 
     else:
         candidate = drive_base / name

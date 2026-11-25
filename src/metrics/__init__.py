@@ -5,6 +5,7 @@ from src.metrics.depth_metrics import (
     DepthMetricTracker,
     align_prediction,
     compute_depth_metrics_single,
+    valid_depth_mask,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "DepthMetricTracker",
     "align_prediction",
     "compute_depth_metrics_single",
+    "valid_depth_mask",
 ]

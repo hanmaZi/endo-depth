@@ -10,6 +10,20 @@ import torch
 AlignMode = Literal["median", "scale_shift", "none"]
 
 
+def valid_depth_mask(
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    min_depth: float = 1e-3,
+    max_depth: float | None = None,
+) -> torch.Tensor:
+    """Exclut les coins sans profondeur (< min_depth) et valeurs tronquées (>= max_depth)."""
+    gt = target.squeeze().float()
+    m = mask.squeeze().bool() & torch.isfinite(gt) & (gt >= min_depth)
+    if max_depth is not None:
+        m = m & (gt < (max_depth - 1e-3))
+    return m
+
+
 def align_prediction(
     pred: torch.Tensor,
     target: torch.Tensor,
@@ -28,7 +42,7 @@ def align_prediction(
     """
     p = pred.squeeze().float()
     gt = target.squeeze().float()
-    m = mask.squeeze().bool() & (gt > min_depth)
+    m = valid_depth_mask(gt, mask, min_depth=min_depth, max_depth=max_depth)
 
     if not m.any():
         return p.clamp(min=min_depth, max=max_depth)
@@ -76,11 +90,12 @@ def compute_depth_metrics_single(
     target_mm: torch.Tensor,
     mask: torch.Tensor,
     min_depth: float = 1e-3,
+    max_depth: float | None = None,
 ) -> dict[str, float]:
     """Calcule AbsRel, SqRel, RMSE, RMSE_log et delta < 1.25 / 1.25^2 / 1.25^3 sur 1 image."""
     p = pred_mm.squeeze().float()
     gt = target_mm.squeeze().float()
-    m = mask.squeeze().bool() & (gt > min_depth)
+    m = valid_depth_mask(gt, mask, min_depth=min_depth, max_depth=max_depth)
     if not m.any():
         return {}
 
@@ -141,7 +156,7 @@ class DepthMetricTracker:
                 max_depth=max_depth,
             )
             metrics = compute_depth_metrics_single(
-                aligned, target[idx], mask[idx], min_depth=min_depth
+                aligned, target[idx], mask[idx], min_depth=min_depth, max_depth=max_depth
             )
             if not metrics:
                 continue

@@ -90,11 +90,17 @@ class SimCol3DDataset(BaseEndoscopyDataset):
         test_ratio: float = 0.15,
         seed: int = 42,
         augment: bool = False,
+        sequence_splits: dict[str, list[str]] | None = None,
     ) -> None:
         self.depth_max_mm = float(depth_max_mm)
         all_records = discover_simcol3d_records(root_dir)
         split_records = split_records_by_sequence(
-            all_records, split=split, val_ratio=val_ratio, test_ratio=test_ratio, seed=seed
+            all_records,
+            split=split,
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+            seed=seed,
+            sequence_splits=sequence_splits,
         )
         super().__init__(
             records=split_records,

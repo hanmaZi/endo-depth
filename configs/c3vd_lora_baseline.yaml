@@ -17,6 +17,8 @@ data:
   max_depth_mm: 100.0
   val_ratio: 0.15
   test_ratio: 0.15
+  expected_sequences: null   # Ex. ["cecum_t1_a", "desc_t4_a", "trans_t1_a"] pour exiger ces séquences
+  sequence_splits: null      # Par défaut avec 3 séquences : train=cecum_t1_a, val=desc_t4_a, test=trans_t1_a
   batch_size: 4
   num_workers: 2
   augment: true

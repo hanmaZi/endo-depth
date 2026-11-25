@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ class SampleRecord:
     frame_id: str
     normal_path: Path | None = None
     occlusion_path: Path | None = None
+    fov_mask_path: Path | None = None
 
 
 def read_image_unchanged(path: Path) -> np.ndarray:
@@ -34,15 +36,95 @@ def read_image_unchanged(path: Path) -> np.ndarray:
     return image
 
 
-def detect_specular_mask(rgb_uint8: np.ndarray, v_thresh: int = 235, s_thresh: int = 45) -> np.ndarray:
-    """Détecte approximativement les reflets spéculaires (forte luminosité, faible saturation).
+def detect_specular_mask(
+    rgb_uint8: np.ndarray,
+    valid_mask: np.ndarray | None = None,
+    v_thresh: int = 235,
+    s_thresh: int = 45,
+) -> np.ndarray:
+    """Détecte les reflets spéculaires (forte luminosité, faible saturation) dans le champ valide.
 
-    Retourne un masque booléen (H, W) où True indique un pixel saturé par un reflet.
+    Si `valid_mask` est fourni, exclut les coins noirs, bords hors champ et marqueurs UI.
     """
     hsv = cv2.cvtColor(rgb_uint8, cv2.COLOR_RGB2HSV)
     saturation = hsv[:, :, 1]
     value = hsv[:, :, 2]
-    return (value >= v_thresh) & (saturation <= s_thresh)
+    spec = (value >= v_thresh) & (saturation <= s_thresh)
+    if valid_mask is not None:
+        spec = spec & valid_mask.astype(bool)
+    return spec
+
+
+def summarize_records_by_sequence(records: list[SampleRecord]) -> dict[str, int]:
+    """Retourne le nombre d'images par séquence trié alphabétiquement."""
+    counts = Counter(rec.sequence_name for rec in records)
+    return {seq: counts[seq] for seq in sorted(counts)}
+
+
+def assign_sequence_splits(
+    records: list[SampleRecord],
+    val_ratio: float = 0.15,
+    test_ratio: float = 0.15,
+    seed: int = 42,
+    sequence_splits: dict[str, list[str]] | None = None,
+) -> dict[str, list[str]]:
+    """Assigne des séquences entières à train / val / test sans jamais couper une séquence.
+
+    - Si `sequence_splits` est fourni, utilise ces listes explicitement.
+    - Si exactement 3 séquences sont présentes, assigne automatiquement par taille décroissante :
+      plus grande séquence -> train, 2e -> val, plus petite -> test
+      (ex. train=cecum_t1_a, val=desc_t4_a, test=trans_t1_a).
+    - Si >= 4 séquences sont présentes, découpe aléatoirement (seed) par séquence entière.
+    """
+    counts = summarize_records_by_sequence(records)
+    available = set(counts.keys())
+
+    if sequence_splits is not None:
+        assignment: dict[str, list[str]] = {}
+        seen: set[str] = set()
+        for key in ("train", "val", "test"):
+            seqs = list(sequence_splits.get(key, []))
+            missing = set(seqs) - available
+            if missing:
+                raise ValueError(
+                    f"Séquences introuvables pour split='{key}' : {sorted(missing)} "
+                    f"(disponibles : {sorted(available)})"
+                )
+            overlap = seen & set(seqs)
+            if overlap:
+                raise ValueError(f"Séquences en double entre splits : {sorted(overlap)}")
+            seen.update(seqs)
+            assignment[key] = seqs
+        return assignment
+
+    if len(counts) < 3:
+        raise ValueError(
+            f"Découpage par séquence entière impossible avec {len(counts)} séquence(s) : {counts}. "
+            "Il faut au moins 3 séquences complètes (ex. cecum_t1_a, desc_t4_a, trans_t1_a) "
+            "pour séparer train, val et test sans couper une séquence."
+        )
+
+    if len(counts) == 3:
+        by_size = sorted(counts.keys(), key=lambda s: (-counts[s], s))
+        return {
+            "train": [by_size[0]],
+            "val": [by_size[1]],
+            "test": [by_size[2]],
+        }
+
+    sequences = sorted(counts.keys())
+    rng = random.Random(seed)
+    rng.shuffle(sequences)
+    n_val = max(1, round(len(sequences) * val_ratio))
+    n_test = max(1, round(len(sequences) * test_ratio))
+    if n_val + n_test >= len(sequences):
+        n_val = 1
+        n_test = 1
+    return {
+        "val": sorted(sequences[:n_val]),
+        "test": sorted(sequences[n_val : n_val + n_test]),
+        "train": sorted(sequences[n_val + n_test :]),
+    }
 
 
 def split_records_by_sequence(
@@ -51,50 +133,23 @@ def split_records_by_sequence(
     val_ratio: float = 0.15,
     test_ratio: float = 0.15,
     seed: int = 42,
+    sequence_splits: dict[str, list[str]] | None = None,
 ) -> list[SampleRecord]:
-    """Sépare les échantillons en train/val/test par séquence pour éviter les fuites temporelles.
-
-    Si moins de 3 séquences sont présentes (ex. premier test avec 1 seule séquence),
-    bascule sur un découpage temporel contigu par blocs afin de ne pas obtenir de split vide.
-    """
+    """Sépare les échantillons en train/val/test par séquence entière (aucune fuite temporelle)."""
     if split not in {"train", "val", "test", "all"}:
         raise ValueError(f"Split inconnu : {split}. Attendu : train, val, test ou all.")
     if split == "all" or not records:
         return records
 
-    sequences = sorted({rec.sequence_name for rec in records})
-    rng = random.Random(seed)
-    rng.shuffle(sequences)
-
-    if len(sequences) >= 3:
-        n_val = max(1, round(len(sequences) * val_ratio))
-        n_test = max(1, round(len(sequences) * test_ratio))
-        if n_val + n_test >= len(sequences):
-            n_val = 1
-            n_test = 1
-        val_seqs = set(sequences[:n_val])
-        test_seqs = set(sequences[n_val : n_val + n_test])
-        train_seqs = set(sequences[n_val + n_test :])
-        target_seqs = {"train": train_seqs, "val": val_seqs, "test": test_seqs}[split]
-        return [rec for rec in records if rec.sequence_name in target_seqs]
-
-    if len(sequences) == 2:
-        # 1 séquence en train, 1 partagée contiguë entre val et test
-        if split == "train":
-            return [rec for rec in records if rec.sequence_name == sequences[0]]
-        second = [rec for rec in records if rec.sequence_name == sequences[1]]
-        mid = max(1, len(second) // 2)
-        return second[:mid] if split == "val" else second[mid:]
-
-    # Cas 1 seule séquence : découpage contigu (70% train / 15% val / 15% test)
-    n = len(records)
-    i_val = max(1, int(n * (1.0 - val_ratio - test_ratio)))
-    i_test = max(i_val + 1, int(n * (1.0 - test_ratio))) if n >= 3 else n
-    if split == "train":
-        return records[:i_val]
-    if split == "val":
-        return records[i_val:i_test] or records[-1:]
-    return records[i_test:] or records[-1:]
+    assignment = assign_sequence_splits(
+        records,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        seed=seed,
+        sequence_splits=sequence_splits,
+    )
+    target_seqs = set(assignment[split])
+    return [rec for rec in records if rec.sequence_name in target_seqs]
 
 
 class BaseEndoscopyDataset(Dataset):
@@ -139,11 +194,24 @@ class BaseEndoscopyDataset(Dataset):
         depth_mm = self._decode_depth_mm(record).astype(np.float32)
         normals = self._decode_normals(record)
 
+        fov_mask: np.ndarray | None = None
+        if record.fov_mask_path is not None and record.fov_mask_path.is_file():
+            raw_fov = read_image_unchanged(record.fov_mask_path)
+            if raw_fov.ndim == 3:
+                raw_fov = raw_fov[:, :, 0]
+            fov_mask = (raw_fov > 0).astype(np.uint8)
+
         # Redimensionnement : bilinéaire pour RGB, plus proche voisin pour profondeur/masques
         rgb_resized = cv2.resize(rgb, (self.width, self.height), interpolation=cv2.INTER_LINEAR)
         depth_resized = cv2.resize(
             depth_mm, (self.width, self.height), interpolation=cv2.INTER_NEAREST
         )
+        if fov_mask is not None:
+            fov_resized = (
+                cv2.resize(fov_mask, (self.width, self.height), interpolation=cv2.INTER_NEAREST) > 0
+            )
+        else:
+            fov_resized = np.ones((self.height, self.width), dtype=bool)
 
         if normals is not None:
             normals_resized = cv2.resize(
@@ -158,14 +226,17 @@ class BaseEndoscopyDataset(Dataset):
         if self.augment and random.random() < 0.5:
             rgb_resized = np.ascontiguousarray(rgb_resized[:, ::-1])
             depth_resized = np.ascontiguousarray(depth_resized[:, ::-1])
+            fov_resized = np.ascontiguousarray(fov_resized[:, ::-1])
             if normals is not None:
                 normals_resized = np.ascontiguousarray(normals_resized[:, ::-1])
                 normals_resized[:, :, 0] *= -1.0  # Miroir gauche-droite => inverse Nx
 
+        # Exclut les coins sans profondeur (< min_depth_mm) ET les pixels tronqués (= max_depth_mm)
         valid_mask = (
-            np.isfinite(depth_resized)
+            fov_resized
+            & np.isfinite(depth_resized)
             & (depth_resized >= self.min_depth_mm)
-            & (depth_resized <= self.max_depth_mm)
+            & (depth_resized < (self.max_depth_mm - 1e-3))
         )
 
         if normals is not None:
@@ -174,7 +245,11 @@ class BaseEndoscopyDataset(Dataset):
             valid_mask = valid_mask & valid_normals
             normals_resized = normals_resized / np.clip(norm_len, 1e-6, None)
 
-        specular_mask = detect_specular_mask(rgb_resized)
+        # Met explicitement à zéro les zones hors masque (coins, bords, 100 mm tronqués)
+        depth_resized = np.where(valid_mask, depth_resized, 0.0).astype(np.float32)
+        normals_resized = np.where(valid_mask[:, :, None], normals_resized, 0.0).astype(np.float32)
+
+        specular_mask = detect_specular_mask(rgb_resized, valid_mask=valid_mask)
 
         image_tensor = torch.from_numpy(rgb_resized.transpose(2, 0, 1)).float() / 255.0
         depth_tensor = torch.from_numpy(depth_resized).unsqueeze(0).float()

@@ -73,7 +73,7 @@ class SiLogLoss(nn.Module):
         )
         mean_sq = (log_diff**2).mean()
         sq_mean = (log_diff.mean()) ** 2
-        return torch.sqrt((mean_sq - self.variance_focus * sq_mean).clamp(min=1e-8))
+        return torch.sqrt((mean_sq - self.variance_focus * sq_mean).clamp(min=1e-12))
 
 
 class MultiScaleGradientLoss(nn.Module):
@@ -141,14 +141,33 @@ class SurfaceNormalLoss(nn.Module):
         if target_normals is not None and has_normals is not None:
             if isinstance(has_normals, bool):
                 gt_normals = target_normals if has_normals else pseudo_normals
+                using_gt_normals = torch.full(
+                    (pred_depth.shape[0], 1, 1), has_normals, device=pred_depth.device, dtype=torch.bool
+                )
             else:
                 use_gt = has_normals.to(pred_depth.device).view(-1, 1, 1, 1).bool()
                 gt_normals = torch.where(use_gt, target_normals, pseudo_normals)
+                using_gt_normals = use_gt.squeeze(1)
         else:
             gt_normals = pseudo_normals
+            using_gt_normals = torch.zeros(
+                (pred_depth.shape[0], 1, 1), device=pred_depth.device, dtype=torch.bool
+            )
+
+        # Pour les pseudo-normales issues de target_depth, exclut le bord 1px touchant un coin/pixel invalide
+        m_2d = mask.squeeze(1).bool()
+        m_pad = F.pad(m_2d.float().unsqueeze(1), (1, 1, 1, 1), mode="constant", value=0.0)
+        interior_m = (
+            m_pad[:, 0, 1:-1, 2:]
+            * m_pad[:, 0, 1:-1, :-2]
+            * m_pad[:, 0, 2:, 1:-1]
+            * m_pad[:, 0, :-2, 1:-1]
+            * m_2d.float()
+        ) > 0.5
+        gt_norm_valid = torch.linalg.norm(gt_normals, dim=1) > 1e-3
+        m_2d = torch.where(using_gt_normals, m_2d & gt_norm_valid, interior_m)
 
         # Harmonise l'orientation globale du repère si les normales GT pointent vers +Z
-        m_2d = mask.squeeze(1).bool()
         if m_2d.any():
             nz_mean = gt_normals[:, 2, :, :][m_2d].mean()
             if nz_mean > 0.1:
@@ -172,12 +191,16 @@ class EndoDepthLoss(nn.Module):
         grad_scales: int = 3,
         fx: float | None = None,
         fy: float | None = None,
+        min_depth_mm: float = 1.0,
+        max_depth_mm: float | None = 100.0,
     ) -> None:
         super().__init__()
         self.w_l1 = float(w_l1)
         self.w_silog = float(w_silog)
         self.w_grad = float(w_grad)
         self.w_normal = float(w_normal)
+        self.min_depth_mm = float(min_depth_mm)
+        self.max_depth_mm = float(max_depth_mm) if max_depth_mm is not None else None
 
         self.silog = SiLogLoss()
         self.grad = MultiScaleGradientLoss(num_scales=grad_scales)
@@ -191,17 +214,20 @@ class EndoDepthLoss(nn.Module):
         target_normals: torch.Tensor | None = None,
         has_normals: torch.Tensor | bool | None = None,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        valid = mask.bool()
+        # Exclut coins sans profondeur (< min_depth_mm) et valeurs tronquées (>= max_depth_mm)
+        valid = mask.bool() & torch.isfinite(target_depth) & (target_depth >= self.min_depth_mm)
+        if self.max_depth_mm is not None:
+            valid = valid & (target_depth < (self.max_depth_mm - 1e-3))
         zero = pred_depth.sum() * 0.0
 
         loss_l1 = torch.abs(pred_depth[valid] - target_depth[valid]).mean() if valid.any() else zero
-        loss_silog = self.silog(pred_depth, target_depth, mask) if self.w_silog > 0 else zero
-        loss_grad = self.grad(pred_depth, target_depth, mask) if self.w_grad > 0 else zero
+        loss_silog = self.silog(pred_depth, target_depth, valid) if self.w_silog > 0 else zero
+        loss_grad = self.grad(pred_depth, target_depth, valid) if self.w_grad > 0 else zero
         loss_normal = (
             self.normal(
                 pred_depth,
                 target_depth,
-                mask,
+                valid,
                 target_normals=target_normals,
                 has_normals=has_normals,
             )
@@ -229,6 +255,7 @@ class EndoDepthLoss(nn.Module):
 def build_loss_from_config(config: dict[str, Any]) -> EndoDepthLoss:
     """Instancie EndoDepthLoss à partir de la section `loss` d'un fichier YAML."""
     loss_cfg = config.get("loss", {})
+    data_cfg = config.get("data", {})
     return EndoDepthLoss(
         w_l1=float(loss_cfg.get("w_l1", 1.0)),
         w_silog=float(loss_cfg.get("w_silog", 1.0)),
@@ -237,4 +264,6 @@ def build_loss_from_config(config: dict[str, Any]) -> EndoDepthLoss:
         grad_scales=int(loss_cfg.get("grad_scales", 3)),
         fx=loss_cfg.get("fx"),
         fy=loss_cfg.get("fy"),
+        min_depth_mm=float(data_cfg.get("min_depth_mm", 1.0)),
+        max_depth_mm=float(data_cfg.get("max_depth_mm", 100.0)),
     )

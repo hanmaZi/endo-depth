@@ -27,7 +27,7 @@ Deux organisations de dossiers sont gérées automatiquement :
 2. **Format sous-dossiers** : `data/c3vd/<sequence>/color/0000_color.png`, `depth/0000_depth.tiff`, `normals/0000_normals.tiff`
 
 Encodage vérifié :
-- **Profondeur** : TIFF 16-bit non signé (`0..65535`) → $\text{depth\_mm} = (\text{raw} / 65535.0) \times 100.0$ (plage `0` à `100 mm`). Les pixels à `0` (ou masqués par `*_occlusion.png`) sont exclus du masque valide.
+- **Profondeur** : TIFF 16-bit non signé (`0..65535`) → $\text{depth\_mm} = (\text{raw} / 65535.0) \times 100.0$ (plage `0` à `100 mm`). Les pixels sans profondeur (`0`, coins noirs / hors champ / `mask.png`) **et les pixels tronqués à `100,0 mm` (`65535`)** sont exclus du masque valide, des losses et des métriques.
 - **Normales de surface** : TIFF RGB 16-bit (`0..65535`) → $n = (\text{raw} / 65535.0) \times 2.0 - 1.0 \in [-1, 1]^3$ dans le repère caméra (attention : OpenCV lit en BGR, le loader convertit en RGB `(X, Y, Z)` puis renormalise à norme unitaire).
 
 ### 2.2. SimCol3D ([`src/datasets/simcol3d.py`](../src/datasets/simcol3d.py))

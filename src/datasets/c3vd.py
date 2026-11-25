@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 import zipfile
 from pathlib import Path
+from typing import Iterable
 
 import cv2
 import numpy as np
@@ -14,6 +15,7 @@ from src.datasets.base import (
     SampleRecord,
     read_image_unchanged,
     split_records_by_sequence,
+    summarize_records_by_sequence,
 )
 
 
@@ -26,8 +28,41 @@ def _unwrap_duplicate_seq_dir(seq_dir: Path) -> Path:
     return seq_dir
 
 
+def _find_matching_map(
+    rgb_path: Path, seq_dir: Path, frame_id: str, kind: str, extensions: tuple[str, ...]
+) -> Path | None:
+    """Recherche une carte associée (depth, normals, occlusion) sous plusieurs conventions C3VD."""
+    candidates: list[Path] = []
+    for ext in extensions:
+        candidates.append(rgb_path.with_name(f"{frame_id}_{kind}{ext}"))
+        candidates.append(seq_dir / kind / f"{frame_id}_{kind}{ext}")
+        candidates.append(seq_dir / kind / f"{frame_id}{ext}")
+        if kind == "occlusion":
+            candidates.append(seq_dir / "occlusions" / f"{frame_id}_{kind}{ext}")
+            candidates.append(seq_dir / "occlusions" / f"{frame_id}{ext}")
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _is_valid_c3vd_dir(seq_dir: Path) -> bool:
+    """Vérifie qu'un dossier de séquence contient au moins une paire RGB + profondeur valide."""
+    if not seq_dir.is_dir():
+        return False
+    try:
+        return len(discover_c3vd_records(seq_dir)) > 0
+    except RuntimeError:
+        return False
+
+
 def _extract_c3vd_zip(zip_path: Path, target_dir: Path) -> Path:
-    """Extrait une archive C3VD (.zip) vers target_dir/<sequence>/ sans dossier parasite."""
+    """Extrait une archive C3VD (.zip) vers target_dir/<zip_stem>/ et vérifie le résultat."""
+    dest_seq = target_dir / zip_path.stem
+    if _is_valid_c3vd_dir(dest_seq):
+        print(f"[Skip] Archive déjà extraite : {dest_seq}")
+        return dest_seq
+
     with zipfile.ZipFile(zip_path, "r") as zf:
         members = [
             info
@@ -45,17 +80,6 @@ def _extract_c3vd_zip(zip_path: Path, target_dir: Path) -> Path:
         has_root_files = any(len(parts) == 1 for parts in parts_list)
         top_dirs = {parts[0] for parts in parts_list}
 
-        if not has_root_files and len(top_dirs) == 1:
-            seq_name = next(iter(top_dirs))
-            dest_seq = target_dir / seq_name
-        else:
-            seq_name = zip_path.stem
-            dest_seq = target_dir / seq_name
-
-        if dest_seq.is_dir() and any(dest_seq.rglob("*_color.png")):
-            print(f"[Skip] Archive déjà extraite : {dest_seq}")
-            return dest_seq
-
         tmp_extract = target_dir / f"._tmp_{zip_path.stem}"
         if tmp_extract.exists():
             shutil.rmtree(tmp_extract)
@@ -64,20 +88,30 @@ def _extract_c3vd_zip(zip_path: Path, target_dir: Path) -> Path:
         for info in members:
             rel_path = Path(info.filename)
             out_path = (tmp_extract / rel_path).resolve()
-            # Protection contre la traversée de chemin (Zip Slip)
             if not out_path.is_relative_to(resolved_root):
                 raise RuntimeError(f"Chemin dangereux détecté dans {zip_path} : {info.filename}")
             out_path.parent.mkdir(parents=True, exist_ok=True)
             with zf.open(info, "r") as src, out_path.open("wb") as dst:
                 shutil.copyfileobj(src, dst)
 
-    src_content = tmp_extract / seq_name if (not has_root_files and len(top_dirs) == 1) else tmp_extract
+    if not has_root_files and len(top_dirs) == 1:
+        src_content = tmp_extract / next(iter(top_dirs))
+    else:
+        src_content = tmp_extract
     src_content = _unwrap_duplicate_seq_dir(src_content)
+
     if dest_seq.exists():
         shutil.rmtree(dest_seq)
     shutil.move(str(src_content), str(dest_seq))
     if tmp_extract.exists():
         shutil.rmtree(tmp_extract)
+
+    if not _is_valid_c3vd_dir(dest_seq):
+        sample_files = [str(p.relative_to(dest_seq)) for p in sorted(dest_seq.rglob("*"))[:10]]
+        raise RuntimeError(
+            f"Archive extraite mais aucune paire RGB/profondeur détectée dans {dest_seq} "
+            f"(exemples de fichiers extraits : {sample_files})."
+        )
 
     print(f"[Extract] {zip_path.name} -> {dest_seq}")
     return dest_seq
@@ -88,7 +122,7 @@ def prepare_c3vd_from_source(source_dir: str | Path, target_dir: str | Path) -> 
 
     - Si un élément est un `.zip`, il est décompressé vers `target_dir/<sequence>/`.
     - Si un élément est un dossier de séquence, il est copié vers `target_dir/<sequence>/`.
-    Les deux cas produisent exactement le même arbre `target_dir/<sequence>/...`.
+    Chaque séquence préparée est immédiatement vérifiée pour ne jamais passer une archive sous silence.
     """
     src = Path(source_dir)
     dst = Path(target_dir)
@@ -96,15 +130,20 @@ def prepare_c3vd_from_source(source_dir: str | Path, target_dir: str | Path) -> 
         raise FileNotFoundError(f"Dossier source C3VD introuvable : {src}")
     dst.mkdir(parents=True, exist_ok=True)
 
+    items = [
+        item
+        for item in sorted(src.iterdir())
+        if not item.name.startswith(".") and item.name != "__MACOSX"
+    ]
+    print(f"[Source] {src} contient : {[p.name for p in items]}")
+
     prepared: list[Path] = []
-    for item in sorted(src.iterdir()):
-        if item.name.startswith(".") or item.name == "__MACOSX":
-            continue
+    for item in items:
         if item.is_file() and item.suffix.lower() == ".zip":
             prepared.append(_extract_c3vd_zip(item, dst))
         elif item.is_dir():
             dest_seq = dst / item.name
-            if dest_seq.is_dir() and any(dest_seq.rglob("*_color.png")):
+            if _is_valid_c3vd_dir(dest_seq):
                 print(f"[Skip] Dossier déjà présent : {dest_seq}")
                 prepared.append(dest_seq)
                 continue
@@ -116,6 +155,10 @@ def prepare_c3vd_from_source(source_dir: str | Path, target_dir: str | Path) -> 
             if dest_seq.exists():
                 shutil.rmtree(dest_seq)
             shutil.move(str(tmp_copy), str(dest_seq))
+            if not _is_valid_c3vd_dir(dest_seq):
+                raise RuntimeError(
+                    f"Le dossier copié {dest_seq} ne contient aucune paire RGB/profondeur valide."
+                )
             print(f"[Copy] {item.name}/ -> {dest_seq}")
             prepared.append(dest_seq)
 
@@ -124,39 +167,63 @@ def prepare_c3vd_from_source(source_dir: str | Path, target_dir: str | Path) -> 
     return dst
 
 
-def discover_c3vd_records(root_dir: str | Path) -> list[SampleRecord]:
-    """Parcourt un dossier C3VD (format plat, sous-dossiers color/depth/normals, ou imbriqué)."""
+def discover_c3vd_records(
+    root_dir: str | Path,
+    expected_sequences: Iterable[str] | None = None,
+) -> list[SampleRecord]:
+    """Parcourt un dossier C3VD (plat, color/depth, rgb/depth, .tiff/.tif) et vérifie les séquences."""
     root = Path(root_dir)
     if not root.is_dir():
         raise FileNotFoundError(f"Dossier C3VD introuvable : {root}")
 
-    records: list[SampleRecord] = []
-    color_candidates = sorted(
-        p
-        for p in root.rglob("*_color.png")
-        if "__MACOSX" not in p.parts and not any(part.startswith(".") for part in p.parts)
-    )
+    candidates: list[tuple[Path, Path, str]] = []
+    seen_rgb: set[Path] = set()
 
-    for rgb_path in color_candidates:
-        seq_dir = rgb_path.parent.parent if rgb_path.parent.name.lower() == "color" else rgb_path.parent
-        frame_id = rgb_path.stem.replace("_color", "")
-
-        depth_path = rgb_path.with_name(f"{frame_id}_depth.tiff")
-        if not depth_path.is_file():
-            alt_depth = seq_dir / "depth" / f"{frame_id}_depth.tiff"
-            depth_path = alt_depth if alt_depth.is_file() else depth_path
-        if not depth_path.is_file():
+    for rgb_path in sorted(root.rglob("*")):
+        if not rgb_path.is_file():
+            continue
+        if "__MACOSX" in rgb_path.parts or any(part.startswith(".") for part in rgb_path.parts):
+            continue
+        if rgb_path.suffix.lower() != ".png":
             continue
 
-        normal_path = rgb_path.with_name(f"{frame_id}_normals.tiff")
-        if not normal_path.is_file():
-            alt_normal = seq_dir / "normals" / f"{frame_id}_normals.tiff"
-            normal_path = alt_normal if alt_normal.is_file() else None
+        stem_lower = rgb_path.stem.lower()
+        parent_lower = rgb_path.parent.name.lower()
 
-        occ_path = rgb_path.with_name(f"{frame_id}_occlusion.png")
-        if not occ_path.is_file():
-            alt_occ = seq_dir / "occlusion" / f"{frame_id}_occlusion.png"
-            occ_path = alt_occ if alt_occ.is_file() else None
+        if stem_lower.endswith("_color"):
+            seq_dir = rgb_path.parent.parent if parent_lower == "color" else rgb_path.parent
+            frame_id = rgb_path.stem[: -len("_color")]
+        elif parent_lower in {"color", "rgb"} and not any(
+            tag in stem_lower for tag in ("mask", "occlusion", "depth", "normal")
+        ):
+            seq_dir = rgb_path.parent.parent
+            frame_id = rgb_path.stem
+        else:
+            continue
+
+        if rgb_path in seen_rgb:
+            continue
+        seen_rgb.add(rgb_path)
+        candidates.append((rgb_path, seq_dir, frame_id))
+
+    records: list[SampleRecord] = []
+    for rgb_path, seq_dir, frame_id in candidates:
+        depth_path = _find_matching_map(
+            rgb_path, seq_dir, frame_id, kind="depth", extensions=(".tiff", ".tif", ".TIFF", ".TIF")
+        )
+        if depth_path is None:
+            continue
+
+        normal_path = _find_matching_map(
+            rgb_path, seq_dir, frame_id, kind="normals", extensions=(".tiff", ".tif", ".TIFF", ".TIF")
+        )
+        occ_path = _find_matching_map(
+            rgb_path, seq_dir, frame_id, kind="occlusion", extensions=(".png", ".tiff", ".tif")
+        )
+        fov_mask_path = rgb_path.with_name(f"{frame_id}_mask.png")
+        if not fov_mask_path.is_file():
+            seq_mask = seq_dir / "mask.png"
+            fov_mask_path = seq_mask if seq_mask.is_file() else None
 
         records.append(
             SampleRecord(
@@ -164,6 +231,7 @@ def discover_c3vd_records(root_dir: str | Path) -> list[SampleRecord]:
                 depth_path=depth_path,
                 normal_path=normal_path,
                 occlusion_path=occ_path,
+                fov_mask_path=fov_mask_path,
                 sequence_name=seq_dir.name,
                 frame_id=frame_id,
             )
@@ -171,9 +239,20 @@ def discover_c3vd_records(root_dir: str | Path) -> list[SampleRecord]:
 
     if not records:
         raise RuntimeError(
-            f"Aucune paire (*_color.png, *_depth.tiff) trouvée dans {root}. "
+            f"Aucune paire (RGB, profondeur) trouvée dans {root}. "
             "Vérifie que les séquences C3VD sont bien décompressées."
         )
+
+    if expected_sequences is not None:
+        counts = summarize_records_by_sequence(records)
+        expected_list = [str(s) for s in expected_sequences]
+        missing = [s for s in expected_list if counts.get(s, 0) == 0]
+        if missing:
+            raise RuntimeError(
+                f"Séquences C3VD attendues manquantes ou vides : {missing}. "
+                f"Séquences chargées : {counts}"
+            )
+
     return records
 
 
@@ -193,10 +272,21 @@ class C3VDDataset(BaseEndoscopyDataset):
         test_ratio: float = 0.15,
         seed: int = 42,
         augment: bool = False,
+        expected_sequences: Iterable[str] | None = None,
+        sequence_splits: dict[str, list[str]] | None = None,
     ) -> None:
-        all_records = discover_c3vd_records(root_dir)
+        all_records = discover_c3vd_records(root_dir, expected_sequences=expected_sequences)
+        if split in {"all", "train"}:
+            counts = summarize_records_by_sequence(all_records)
+            print(f"[C3VD] Séquences trouvées (total={len(all_records)} frames) : {counts}")
+
         split_records = split_records_by_sequence(
-            all_records, split=split, val_ratio=val_ratio, test_ratio=test_ratio, seed=seed
+            all_records,
+            split=split,
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+            seed=seed,
+            sequence_splits=sequence_splits,
         )
         super().__init__(
             records=split_records,
