@@ -1,0 +1,50 @@
+# === Environnements Python ===
+.venv/
+venv/
+env/
+ENV/
+
+# === Caches Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# === Jupyter / Notebooks ===
+.ipynb_checkpoints/
+
+# === Datasets (ne jamais pousser les données médicales sur Git) ===
+data/*
+!data/.gitkeep
+
+# === Checkpoints, poids de modèles et logs lourds ===
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.onnx
+*.h5
+results/**/checkpoints/
+results/**/logs/
+results/**/*.npy
+results/**/*.npz
+results/smoke_*.json
+wandb/
+runs/
+lightning_logs/
+
+# === Cache local HuggingFace / PyTorch ===
+.cache/
+
+# === Système & IDE ===
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo

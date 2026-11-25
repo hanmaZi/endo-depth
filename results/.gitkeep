@@ -1,0 +1,2 @@
+# Ce dossier stocke les résultats d'expériences (métriques, graphiques, configs).
+# Les checkpoints volumineux (*.pth, *.pt, *.ckpt) sont ignorés par Git.

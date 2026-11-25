@@ -1,0 +1,35 @@
+# Configuration de base pour endo-depth
+# Chaque paramètre est commenté pour être facilement compris et modifié.
+
+experiment_name: "baseline_smoke"
+seed: 42                # Graine aléatoire pour rendre les expériences reproductibles
+device: "auto"          # "auto" (CUDA si dispo, sinon CPU), "cuda" ou "cpu"
+
+paths:
+  data_dir: "data"
+  results_dir: "results"
+  checkpoint_dir: "results/checkpoints"
+
+data:
+  dataset_name: "synthetic_smoke"  # Sera remplacé par C3VD / SimCol3D / etc. à l'étape C
+  image_size: [256, 256]           # [Hauteur, Largeur] en pixels
+  batch_size: 4                    # Petit batch adapté aux GPU gratuits (T4 16 Go) et tests CPU
+  num_workers: 0                   # 0 conseillé sous Windows / tests CPU ; 2 sur Colab/Linux
+
+model:
+  name: "depth_anything_v2_small"
+  pretrained_id: "depth-anything/Depth-Anything-V2-Small-hf"
+  freeze_backbone: true            # Geler le backbone réduit la VRAM nécessaire au fine-tuning
+
+training:
+  epochs: 5
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  use_amp: true                    # Précision mixte (FP16) sur GPU pour économiser mémoire et temps
+  save_every_n_epochs: 1           # Sauvegarde fréquente : indispensable sur Colab/Kaggle (coupures)
+  resume_from: null                # Chemin vers un checkpoint .pt/.pth pour reprendre l'entraînement
+
+evaluation:
+  median_scaling: true             # Alignement d'échelle médian (standard en estimation monoculaire)
+  min_depth: 1.0e-3
+  max_depth: 100.0
