@@ -88,3 +88,16 @@ Ce journal trace chronologiquement ce qui a été fait, les choix techniques pri
   1. [`BaseEndoscopyDataset`](../src/datasets/base.py) (`color_augment: true`) : jitter photométrique multiplicatif (gamma, luminosité, gains RGB) préservant à `0` les coins noirs du masque endoscopique.
   2. [`MultiScaleGradientLoss`](../src/losses/depth_losses.py) (`use_log: true`) et [`SurfaceNormalLoss`](../src/losses/depth_losses.py) (`use_gt_normals: false`, `w_normal: 0.25`) : gradients multi-échelles sur `log(depth)` et cohérence des normales 3D extraites symétriquement de `pred_depth` et `target_depth`.
   3. [`c3vd_lora_baseline.yaml`](../configs/c3vd_lora_baseline.yaml) et [`c3vd_lora_grad_norm.yaml`](../configs/c3vd_lora_grad_norm.yaml) (`*_v2`) + [`src/train.py`](../src/train.py) : `train_neck: false`, `epochs: 12`, `learning_rate: 5.0e-5`, `weight_decay: 1.0e-2`, `lr_scheduler: "cosine"`.
+
+## 26 novembre 2026 — Résultats Colab T4 Lot 1 (`v2`) vs `v1`
+- **Comportement des courbes (lecture graphique) :**
+  - La loss d'entraînement `v2` décroît régulièrement (`~9.4` à l'époque 1 → `~1.3` à l'époque 12) au lieu de chuter sous `1.0` dès l'époque 4–5 (`v1`).
+  - Sur `desc_t4_a` (`val_AbsRel`), la remontée de surapprentissage disparaît : `v2` descend jusqu'à un minimum à l'époque 8 (`~0.171` Baseline v2, `~0.175` Contrib v2) puis reste stable autour de `~0.181` jusqu'à l'époque 12 (contre `~0.205–0.215` en fin de `v1`).
+- **Résultats mesurés sur le split test `trans_t1_a` (61 images, `eval_test_median.json`) :**
+  - `Baseline LoRA v2 (L1+SiLog, Aug, NoNeck)` : `AbsRel = 0.159225` (**meilleur**), `SqRel = 1.421037`, `RMSE = 9.053005`, `RMSE_log = 0.223624`, `δ < 1.25 = 0.753037` (**meilleur**), `δ < 1.25² = 0.936134`, `δ < 1.25³ = 0.984224`.
+  - `Contrib LoRA v2 + LogGrad/DepthNorm` : `AbsRel = 0.164859`, `SqRel = 1.473564`, `RMSE = 9.183605`, `RMSE_log = 0.229352`, `δ < 1.25 = 0.740674`, `δ < 1.25² = 0.932627`, `δ < 1.25³ = 0.982114`.
+- **Analyse scientifique :**
+  1. Le surapprentissage est corrigé et les métriques de précision relative/locale atteignent leurs meilleurs scores (`AbsRel = 0.159225`, `δ < 1.25 = 0.753037`).
+  2. Le surcoût `RMSE` de la Contribution par rapport à la Baseline est passé de `+1.017 mm` (`8.464` vs `7.447` en `v1`) à seulement `+0.131 mm` (`9.184` vs `9.053` en `v2`), confirmant l'intérêt de `use_gt_normals: false`.
+  3. Le passage `v1 → v2` (`train_neck: false` + `lr = 5e-5` + `color_augment: true`) réduit toutefois la capacité et la vitesse d'adaptation sur les zones lointaines du lumen, ce qui augmente les erreurs quadratiques (`RMSE` `7.447 → 9.053` même pour la Baseline sans perte supplémentaire).
+  4. Avec une seule séquence d'entraînement (`cecum_t1_a`, 276 images), l'étape la plus prioritaire est d'élargir le jeu d'entraînement (**Lot 2 C3VD**) et d'ajouter une métrique de bord/gradient (`Grad_MAE`) pour évaluer objectivement l'apport géométrique de `Contrib`.
