@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import subprocess
+import time
 import zipfile
 from collections import Counter
 from pathlib import Path
@@ -108,73 +111,106 @@ def _is_valid_c3vd_dir(seq_dir: Path) -> bool:
         return False
 
 
+def _copy_file_fast(src: Path, dst: Path) -> None:
+    """Copie un fichier d'un seul bloc (via `cp` système sous Linux/Colab si disponible)."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "posix":
+        cp_bin = shutil.which("cp")
+        if cp_bin:
+            subprocess.run([cp_bin, "-f", str(src), str(dst)], check=True)
+            return
+    shutil.copyfile(src, dst)
+
+
 def _extract_c3vd_zip(zip_path: Path, target_dir: Path) -> Path:
-    """Extrait une archive C3VD (.zip) vers target_dir/<zip_stem>/ et vérifie le résultat."""
+    """Copie localement une archive C3VD (.zip) d'un bloc, la décompresse puis supprime le zip temporaire."""
     dest_seq = target_dir / zip_path.stem
     if _is_valid_c3vd_dir(dest_seq):
-        print(f"[Skip] Archive déjà extraite : {dest_seq}")
+        print(f"[Skip] Séquence déjà présente : {dest_seq}")
         return dest_seq
 
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        members = [
-            info
-            for info in zf.infolist()
-            if not info.is_dir()
-            and not info.filename.startswith("__MACOSX")
-            and "/__MACOSX/" not in info.filename
-            and not Path(info.filename).name.startswith(".")
-            and Path(info.filename).name != "Thumbs.db"
-        ]
-        if not members:
-            raise RuntimeError(f"Archive zip vide : {zip_path}")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    need_stage = zip_path.parent.resolve() != target_dir.resolve()
+    local_zip = (target_dir / f"._tmp_{zip_path.name}") if need_stage else zip_path
+    tmp_extract = target_dir / f"._tmp_{zip_path.stem}"
 
-        parts_list = [Path(info.filename).parts for info in members if Path(info.filename).parts]
-        has_root_files = any(len(parts) == 1 for parts in parts_list)
-        top_dirs = {parts[0] for parts in parts_list}
+    try:
+        if need_stage:
+            if local_zip.exists():
+                local_zip.unlink()
+            size_gb = zip_path.stat().st_size / (1024**3)
+            t0 = time.monotonic()
+            print(f"[CopyZip] {zip_path.name} ({size_gb:.2f} Go) -> {local_zip}")
+            _copy_file_fast(zip_path, local_zip)
+            print(f"[CopyZip] Terminé en {time.monotonic() - t0:.1f}s")
 
-        tmp_extract = target_dir / f"._tmp_{zip_path.stem}"
+        t1 = time.monotonic()
+        with zipfile.ZipFile(local_zip, "r") as zf:
+            members = [
+                info
+                for info in zf.infolist()
+                if not info.is_dir()
+                and not info.filename.startswith("__MACOSX")
+                and "/__MACOSX/" not in info.filename
+                and not Path(info.filename).name.startswith(".")
+                and Path(info.filename).name != "Thumbs.db"
+            ]
+            if not members:
+                raise RuntimeError(f"Archive zip vide : {zip_path}")
+
+            parts_list = [Path(info.filename).parts for info in members if Path(info.filename).parts]
+            has_root_files = any(len(parts) == 1 for parts in parts_list)
+            top_dirs = {parts[0] for parts in parts_list}
+
+            if tmp_extract.exists():
+                shutil.rmtree(tmp_extract)
+            tmp_extract.mkdir(parents=True, exist_ok=True)
+            resolved_root = tmp_extract.resolve()
+            for info in members:
+                rel_path = Path(info.filename)
+                out_path = (tmp_extract / rel_path).resolve()
+                if not out_path.is_relative_to(resolved_root):
+                    raise RuntimeError(f"Chemin dangereux détecté dans {zip_path} : {info.filename}")
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(info, "r") as src_f, out_path.open("wb") as dst_f:
+                    shutil.copyfileobj(src_f, dst_f)
+
+        if not has_root_files and len(top_dirs) == 1:
+            src_content = tmp_extract / next(iter(top_dirs))
+        else:
+            src_content = tmp_extract
+        src_content = _unwrap_duplicate_seq_dir(src_content)
+
+        if dest_seq.exists():
+            shutil.rmtree(dest_seq)
+        shutil.move(str(src_content), str(dest_seq))
+
+        if not _is_valid_c3vd_dir(dest_seq):
+            sample_files = [str(p.relative_to(dest_seq)) for p in sorted(dest_seq.rglob("*"))[:10]]
+            raise RuntimeError(
+                f"Archive extraite mais aucune paire RGB/profondeur détectée dans {dest_seq} "
+                f"(exemples de fichiers extraits : {sample_files})."
+            )
+
+        print(f"[Extract] {zip_path.name} -> {dest_seq} ({time.monotonic() - t1:.1f}s)")
+        return dest_seq
+    finally:
+        if need_stage and local_zip.exists():
+            local_zip.unlink()
         if tmp_extract.exists():
-            shutil.rmtree(tmp_extract)
-        tmp_extract.mkdir(parents=True, exist_ok=True)
-        resolved_root = tmp_extract.resolve()
-        for info in members:
-            rel_path = Path(info.filename)
-            out_path = (tmp_extract / rel_path).resolve()
-            if not out_path.is_relative_to(resolved_root):
-                raise RuntimeError(f"Chemin dangereux détecté dans {zip_path} : {info.filename}")
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(info, "r") as src, out_path.open("wb") as dst:
-                shutil.copyfileobj(src, dst)
-
-    if not has_root_files and len(top_dirs) == 1:
-        src_content = tmp_extract / next(iter(top_dirs))
-    else:
-        src_content = tmp_extract
-    src_content = _unwrap_duplicate_seq_dir(src_content)
-
-    if dest_seq.exists():
-        shutil.rmtree(dest_seq)
-    shutil.move(str(src_content), str(dest_seq))
-    if tmp_extract.exists():
-        shutil.rmtree(tmp_extract)
-
-    if not _is_valid_c3vd_dir(dest_seq):
-        sample_files = [str(p.relative_to(dest_seq)) for p in sorted(dest_seq.rglob("*"))[:10]]
-        raise RuntimeError(
-            f"Archive extraite mais aucune paire RGB/profondeur détectée dans {dest_seq} "
-            f"(exemples de fichiers extraits : {sample_files})."
-        )
-
-    print(f"[Extract] {zip_path.name} -> {dest_seq}")
-    return dest_seq
+            shutil.rmtree(tmp_extract, ignore_errors=True)
 
 
-def prepare_c3vd_from_source(source_dir: str | Path, target_dir: str | Path) -> Path:
+def prepare_c3vd_from_source(
+    source_dir: str | Path,
+    target_dir: str | Path,
+    sequences: Iterable[str] | None = None,
+) -> Path:
     """Prépare C3VD depuis un dossier mixte (.zip et dossiers déjà décompressés).
 
-    - Si un élément est un `.zip`, il est décompressé vers `target_dir/<sequence>/`.
-    - Si un élément est un dossier de séquence, il est copié vers `target_dir/<sequence>/`.
-    Chaque séquence préparée est immédiatement vérifiée pour ne jamais passer une archive sous silence.
+    - Si `sequences` est fourni, ne traite que les séquences sélectionnées.
+    - Saute immédiatement toute séquence déjà extraite et valide dans `target_dir`.
+    - Pour chaque `.zip` manquant, copie l'archive d'un bloc sur disque local avant de la décompresser.
     """
     src = Path(source_dir)
     dst = Path(target_dir)
@@ -189,11 +225,20 @@ def prepare_c3vd_from_source(source_dir: str | Path, target_dir: str | Path) -> 
     ]
     print(f"[Source] {src} contient : {[p.name for p in items]}")
 
+    allowed = {str(s) for s in sequences} if sequences is not None else None
     prepared: list[Path] = []
     for item in items:
-        if item.is_file() and item.suffix.lower() == ".zip":
+        is_zip = item.is_file() and item.suffix.lower() == ".zip"
+        if not is_zip and not item.is_dir():
+            continue
+        seq_name = item.stem if is_zip else item.name
+        if allowed is not None and seq_name not in allowed:
+            print(f"[Filter] Séquence non sélectionnée ignorée : {seq_name}")
+            continue
+
+        if is_zip:
             prepared.append(_extract_c3vd_zip(item, dst))
-        elif item.is_dir():
+        else:
             dest_seq = dst / item.name
             if _is_valid_c3vd_dir(dest_seq):
                 print(f"[Skip] Dossier déjà présent : {dest_seq}")
@@ -226,19 +271,26 @@ def prepare_c3vd_from_source(source_dir: str | Path, target_dir: str | Path) -> 
             prepared.append(dest_seq)
 
     if not prepared:
-        raise RuntimeError(f"Aucune archive .zip ni dossier de séquence trouvé dans {src}")
+        existing = [p for p in dst.iterdir() if p.is_dir() and _is_valid_c3vd_dir(p)] if dst.is_dir() else []
+        if not existing:
+            raise RuntimeError(
+                f"Aucune archive .zip ni dossier de séquence correspondant trouvé dans {src} "
+                f"(filtre={sorted(allowed) if allowed is not None else 'toutes'})."
+            )
     return dst
 
 
 def discover_c3vd_records(
     root_dir: str | Path,
     expected_sequences: Iterable[str] | None = None,
+    include_sequences: Iterable[str] | None = None,
 ) -> list[SampleRecord]:
     """Parcourt un dossier C3VD et apparie souplement RGB + profondeur (.tiff/.tif/.png)."""
     root = Path(root_dir)
     if not root.is_dir():
         raise FileNotFoundError(f"Dossier C3VD introuvable : {root}")
 
+    allowed_seqs = {str(s) for s in include_sequences} if include_sequences is not None else None
     non_rgb_tags = ("mask", "occlusion", "depth", "normal", "flow", "edge")
     rgb_exts = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
     depth_exts = (".tiff", ".tif", ".TIFF", ".TIF", ".png", ".PNG")
@@ -269,6 +321,8 @@ def discover_c3vd_records(
 
         matched: tuple[Path, str, Path] | None = None
         for seq_dir in seq_candidates:
+            if allowed_seqs is not None and seq_dir.name not in allowed_seqs:
+                continue
             for frame_id in _extract_frame_id_candidates(rgb_path.stem):
                 depth_path = _find_matching_map(
                     rgb_path, seq_dir, frame_id, kind="depth", extensions=depth_exts
@@ -346,8 +400,13 @@ class C3VDDataset(BaseEndoscopyDataset):
         color_augment: bool = False,
         expected_sequences: Iterable[str] | None = None,
         sequence_splits: dict[str, list[str]] | None = None,
+        include_sequences: Iterable[str] | None = None,
     ) -> None:
-        all_records = discover_c3vd_records(root_dir, expected_sequences=expected_sequences)
+        all_records = discover_c3vd_records(
+            root_dir,
+            expected_sequences=expected_sequences,
+            include_sequences=include_sequences,
+        )
         if split in {"all", "train"}:
             counts = summarize_records_by_sequence(all_records)
             print(f"[C3VD] Séquences trouvées (total={len(all_records)} frames) : {counts}")

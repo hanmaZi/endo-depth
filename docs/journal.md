@@ -75,29 +75,42 @@ Ce journal trace chronologiquement ce qui a été fait, les choix techniques pri
 - **Constat (via diagnostic dossier) :** Dans `cecum_t1_a`, les images couleur ne sont **pas** paddées sur 4 chiffres (`0_color.png`, `9_color.png`, ..., `99_color.png`, ..., `275_color.png`), alors que les cartes de profondeur/normales/occlusion le sont (`0000_depth.tiff`, `0009_depth.tiff`, ..., `0275_depth.tiff`).
 - **Correction :** [`_extract_frame_id_candidates`](../src/datasets/c3vd.py) génère désormais les variantes paddées (`zfill(4..6)`) et non paddées, et [`discover_c3vd_records`](../src/datasets/c3vd.py) trie les paires par `(sequence_name, frame_id)` (testé localement sur `0_color.png..11_color.png` + `0000_depth.tiff..0011_depth.tiff`).
 
-## 25–26 novembre 2026 — Premiers résultats Colab T4 (Lot 1 C3VD) et corrections v2
+## 25–26 novembre 2026 — Premiers résultats Colab T4 (Lot 1 C3VD) et préparation v2
 - **Protocole réel Colab T4 (Lot 1) :** `cecum_t1_a` (train, 276 images), `desc_t4_a` (val, 148 images), `trans_t1_a` (test, 61 images), alignement médian par frame (`align_mode: "median"`, `eval_test_median.json`).
 - **Résultats mesurés sur `trans_t1_a` (61 images test) :**
   - `Zero-Shot DAV2-Small` : `AbsRel = 0.379189`, `SqRel = 3.155410`, `RMSE = 8.462212`, `RMSE_log = 0.407756`, `δ < 1.25 = 0.475590`.
   - `Baseline LoRA (L1+SiLog)` (`v1`) : `AbsRel = 0.163542`, `SqRel = 1.096292`, `RMSE = 7.446611`, `RMSE_log = 0.209548`, `δ < 1.25 = 0.739860`, `δ < 1.25² = 0.955987`, `δ < 1.25³ = 0.992991`.
   - `Contrib LoRA + Grad/Norm` (`v1`) : `AbsRel = 0.167094`, `SqRel = 1.308990`, `RMSE = 8.464066`, `RMSE_log = 0.221717`, `δ < 1.25 = 0.732430`, `δ < 1.25² = 0.941260`, `δ < 1.25³ = 0.987169`.
-- **Diagnostic des causes racines :**
-  1. **Surapprentissage précoce après les époques 1–2 :** Le split train ne contient qu'une seule séquence sombre (`cecum_t1_a`), tandis que `train_neck: true` libère 2 875 971 paramètres (11,54 % du modèle) à `lr = 1e-4` avec seul flip horizontal — `val_AbsRel` sur `desc_t4_a` remonte ensuite de ~0.165–0.169 (époques 1–2) vers ~0.205–0.215 (époque 15).
-  2. **Décalage modèle fisheye Scaramuzza vs normales pinhole (`RMSE` 8.464 vs 7.447) :** C3VD utilise une calibration omnidirectionnelle Scaramuzza ; comparer des normales issues d'une formule pinhole (`fx = W`) aux `*_normals.tiff` GT produit une perte non nulle même quand `pred_depth == target_depth`.
-- **Correctifs appliqués (`v2`, nouveaux `experiment_name` pour ne pas écraser ni reprendre les checkpoints `v1`) :**
-  1. [`BaseEndoscopyDataset`](../src/datasets/base.py) (`color_augment: true`) : jitter photométrique multiplicatif (gamma, luminosité, gains RGB) préservant à `0` les coins noirs du masque endoscopique.
-  2. [`MultiScaleGradientLoss`](../src/losses/depth_losses.py) (`use_log: true`) et [`SurfaceNormalLoss`](../src/losses/depth_losses.py) (`use_gt_normals: false`, `w_normal: 0.25`) : gradients multi-échelles sur `log(depth)` et cohérence des normales 3D extraites symétriquement de `pred_depth` et `target_depth`.
-  3. [`c3vd_lora_baseline.yaml`](../configs/c3vd_lora_baseline.yaml) et [`c3vd_lora_grad_norm.yaml`](../configs/c3vd_lora_grad_norm.yaml) (`*_v2`) + [`src/train.py`](../src/train.py) : `train_neck: false`, `epochs: 12`, `learning_rate: 5.0e-5`, `weight_decay: 1.0e-2`, `lr_scheduler: "cosine"`.
+- **Observations et hypothèses explorées pour `v2` (non isolées à ce stade) :**
+  1. **Observation (courbes) :** En `v1`, `val_AbsRel` sur `desc_t4_a` atteint son minimum dès les époques 1–2 (`~0.165–0.169`) puis remonte vers `~0.205–0.215` à l'époque 15. **Hypothèse :** le faible volume/diversité du train (`cecum_t1_a` uniquement), combiné à `train_neck: true` (2 875 971 paramètres, 11,54 % du modèle), `lr = 1e-4` et l'absence d'augmentation photométrique, favorise le surapprentissage.
+  2. **Hypothèse (normales Scaramuzza vs pinhole) :** C3VD utilise une calibration omnidirectionnelle Scaramuzza ; comparer des normales estimées par une approximation pinhole (`fx = W`) aux `*_normals.tiff` GT introduit un résidu géométrique même à profondeur exacte, ce qui pourrait pénaliser le `RMSE` de `Contrib v1` (`8.464` vs `7.447`).
+- **Modifications appliquées (`v2`, nouveaux `experiment_name`) :**
+  1. [`BaseEndoscopyDataset`](../src/datasets/base.py) (`color_augment: true`) : jitter photométrique multiplicatif préservant à `0` les coins noirs du masque endoscopique.
+  2. [`MultiScaleGradientLoss`](../src/losses/depth_losses.py) (`use_log: true`) et [`SurfaceNormalLoss`](../src/losses/depth_losses.py) (`use_gt_normals: false`, `w_normal: 0.25`) : gradients sur `log(depth)` et normales extraites symétriquement de `pred_depth` et `target_depth`.
+  3. [`c3vd_lora_baseline.yaml`](../configs/c3vd_lora_baseline.yaml) et [`c3vd_lora_grad_norm.yaml`](../configs/c3vd_lora_grad_norm.yaml) (`*_v2`) + [`src/train.py`](../src/train.py) : `train_neck: false` (175 203 paramètres entraînables, 0,70 %), `epochs: 12`, `learning_rate: 5.0e-5`, `weight_decay: 1.0e-2`, `lr_scheduler: "cosine"`.
 
 ## 26 novembre 2026 — Résultats Colab T4 Lot 1 (`v2`) vs `v1`
-- **Comportement des courbes (lecture graphique) :**
-  - La loss d'entraînement `v2` décroît régulièrement (`~9.4` à l'époque 1 → `~1.3` à l'époque 12) au lieu de chuter sous `1.0` dès l'époque 4–5 (`v1`).
-  - Sur `desc_t4_a` (`val_AbsRel`), la remontée de surapprentissage disparaît : `v2` descend jusqu'à un minimum à l'époque 8 (`~0.171` Baseline v2, `~0.175` Contrib v2) puis reste stable autour de `~0.181` jusqu'à l'époque 12 (contre `~0.205–0.215` en fin de `v1`).
+- **Observations mesurées (courbes) :**
+  - La loss d'entraînement `v2` décroît régulièrement (`~9.4` à l'époque 1 → `~1.3` à l'époque 12) au lieu de chuter sous `1.0` dès les époques 4–5 (`v1`).
+  - Sur `desc_t4_a` (`val_AbsRel`), la remontée observée en `v1` n'apparaît plus : `v2` atteint son minimum à l'époque 8 (`~0.171` Baseline v2, `~0.175` Contrib v2) et reste autour de `~0.181` à l'époque 12 (contre `~0.205–0.215` en fin de `v1`).
 - **Résultats mesurés sur le split test `trans_t1_a` (61 images, `eval_test_median.json`) :**
-  - `Baseline LoRA v2 (L1+SiLog, Aug, NoNeck)` : `AbsRel = 0.159225` (**meilleur**), `SqRel = 1.421037`, `RMSE = 9.053005`, `RMSE_log = 0.223624`, `δ < 1.25 = 0.753037` (**meilleur**), `δ < 1.25² = 0.936134`, `δ < 1.25³ = 0.984224`.
+  - `Baseline LoRA v2 (L1+SiLog, Aug, NoNeck)` : `AbsRel = 0.159225`, `SqRel = 1.421037`, `RMSE = 9.053005`, `RMSE_log = 0.223624`, `δ < 1.25 = 0.753037`, `δ < 1.25² = 0.936134`, `δ < 1.25³ = 0.984224`.
   - `Contrib LoRA v2 + LogGrad/DepthNorm` : `AbsRel = 0.164859`, `SqRel = 1.473564`, `RMSE = 9.183605`, `RMSE_log = 0.229352`, `δ < 1.25 = 0.740674`, `δ < 1.25² = 0.932627`, `δ < 1.25³ = 0.982114`.
-- **Analyse scientifique :**
-  1. Le surapprentissage est corrigé et les métriques de précision relative/locale atteignent leurs meilleurs scores (`AbsRel = 0.159225`, `δ < 1.25 = 0.753037`).
-  2. Le surcoût `RMSE` de la Contribution par rapport à la Baseline est passé de `+1.017 mm` (`8.464` vs `7.447` en `v1`) à seulement `+0.131 mm` (`9.184` vs `9.053` en `v2`), confirmant l'intérêt de `use_gt_normals: false`.
-  3. Le passage `v1 → v2` (`train_neck: false` + `lr = 5e-5` + `color_augment: true`) réduit toutefois la capacité et la vitesse d'adaptation sur les zones lointaines du lumen, ce qui augmente les erreurs quadratiques (`RMSE` `7.447 → 9.053` même pour la Baseline sans perte supplémentaire).
-  4. Avec une seule séquence d'entraînement (`cecum_t1_a`, 276 images), l'étape la plus prioritaire est d'élargir le jeu d'entraînement (**Lot 2 C3VD**) et d'ajouter une métrique de bord/gradient (`Grad_MAE`) pour évaluer objectivement l'apport géométrique de `Contrib`.
+- **Pistes et hypothèses (non isolées car plusieurs changements simultanés entre `v1` et `v2`) :**
+  1. **Hypothèse :** La combinaison `train_neck: false` + `lr = 5e-5` + `color_augment: true` régularise suffisamment pour stabiliser la validation et améliorer `AbsRel` / `δ < 1.25`, mais ralentit l'adaptation des couches restantes aux grandes profondeurs du lumen, d'où une hausse observée de `RMSE` (`7.447 → 9.053` même sans perte additionnelle).
+  2. **Hypothèse :** Le passage à `use_gt_normals: false` (et `w_normal = 0.25`) pourrait expliquer la réduction de l'écart de `RMSE` entre `Contrib` et `Baseline` (`+1.017 mm` en `v1` vs `+0.131 mm` en `v2`), mais une ablation isolée est nécessaire pour le confirmer.
+  3. **Hypothèse :** Avec une seule séquence d'entraînement (`cecum_t1_a`), l'apport géométrique de `Grad/Norm` est peu capté par `AbsRel`/`RMSE` seuls ; élargir les données (Lot 2) et mesurer les contours (`Grad_MAE`) est prioritaire avant tout changement d'hyperparamètres.
+
+## 26 novembre 2026 — Préparation `v3` (Lot 2 C3VD, `Grad_MAE`, anti-fuite de texture et protocole d'ablation)
+- **Données disponibles dans `c3vd_zips` (9 séquences au total) :** Lot 1 (`cecum_t1_a`, `desc_t4_a`, `trans_t1_a`) + Lot 2 vague 1 en `.zip` (`cecum_t2_a`, `sigmoid_t2_a`, `sigmoid_t3_a`, `trans_t2_a`, `trans_t3_a`, `trans_t3_b`).
+- **Préparation rapide Colab ([`src/datasets/c3vd.py`](../src/datasets/c3vd.py)) :** sélection configurable via `SELECTED_SEQUENCES`, saut automatique des dossiers déjà valides dans `/content/data/c3vd`, copie séquentielle d'un bloc (`cp`) de chaque `.zip` vers le disque local suivie d'une décompression locale et suppression immédiate de l'archive temporaire.
+- **Critère explicite de découpage sans fuite de texture ([`src/datasets/base.py`](../src/datasets/base.py)) :**
+  - Dans C3VD, les suffixes `_t1.._t4` identifient les textures appliquées aux fantômes, et `_a`/`_b` correspondent à des trajectoires différentes sur le même segment et la même texture (ex. `trans_t3_a` et `trans_t3_b`).
+  - Règle appliquée : découpage par **séquences entières** avec **disjonction stricte des groupes de texture** entre `train`, `val` et `test` (vérifiée automatiquement par [`validate_no_texture_leakage`](../src/datasets/base.py)) :
+    - **`train` (`t2` + `t3`, 6 séquences / 3 segments) :** `cecum_t2_a`, `sigmoid_t2_a`, `sigmoid_t3_a`, `trans_t2_a`, `trans_t3_a`, `trans_t3_b`.
+    - **`val` (`t4`, 1 séquence) :** `desc_t4_a`.
+    - **`test` (`t1`, 2 séquences / 2 segments) :** `cecum_t1_a`, `trans_t1_a` *(permet de conserver `trans_t1_a` pour la comparaison par séquence avec le Lot 1 tout en évaluant un second segment inédit en Lot 2)*.
+- **Évaluation et visualisation ajoutées en `v3` (hyperparamètres `v2` strictement conservés : `epochs=12`, `lr=5e-5`, `weight_decay=1e-2`, `cosine`, `train_neck=false`, `color_augment=true`) :**
+  - Ajout de `grad_mae` (MAE des gradients spatiaux en mm/px) et sauvegarde systématique de `per_sequence_metrics` dans [`src/metrics/depth_metrics.py`](../src/metrics/depth_metrics.py), [`src/eval.py`](../src/eval.py) et [`src/train.py`](../src/train.py).
+  - Grille qualitative dans [`notebooks/03_train_lora_contrib.ipynb`](../notebooks/03_train_lora_contrib.ipynb) : `RGB | Vérité terrain | Baseline v3 | Contrib v3 | Erreur |Baseline - GT| | Erreur |Contrib - GT|`.
+  - Préparation de l'ablation isolée en 4 variantes ([`configs/c3vd_v3_*.yaml`](../configs)) : `baseline`, `grad_only`, `norm_only`, `grad_norm`, sur 3 graines (`42, 123, 2026`), agrégée en moyenne ± écart-type globalement et par séquence de test via [`aggregate_ablation_results`](../src/eval.py).

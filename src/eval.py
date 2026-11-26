@@ -9,6 +9,8 @@ Exemples :
 from __future__ import annotations
 
 import argparse
+import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -115,7 +117,8 @@ def evaluate_loader(
     min_depth: float = 1.0,
     max_depth: float = 100.0,
     max_batches: int | None = None,
-) -> dict[str, float]:
+    return_per_sequence: bool = False,
+) -> dict[str, float] | tuple[dict[str, float], dict[str, dict[str, float]]]:
     """Évalue un modèle sur un DataLoader et retourne les métriques standard moyennées."""
     model.eval()
     tracker = DepthMetricTracker()
@@ -126,6 +129,7 @@ def evaluate_loader(
         images = batch["image"].to(device)
         depths = batch["depth"].to(device)
         masks = batch["mask"].to(device)
+        sequences = batch.get("sequence")
 
         preds = model(images)
         tracker.update_batch(
@@ -136,11 +140,84 @@ def evaluate_loader(
             align_mode=align_mode,  # type: ignore[arg-type]
             min_depth=min_depth,
             max_depth=max_depth,
+            sequences=sequences,
         )
 
     metrics = tracker.compute()
     metrics["num_evaluated_frames"] = float(tracker.count)
+    if return_per_sequence:
+        return metrics, tracker.compute_per_sequence()
     return metrics
+
+
+def _summarize_metric_dicts(rows: list[dict[str, float]]) -> dict[str, dict[str, Any]]:
+    """Agrège une liste de dictionnaires de métriques en moyenne ± écart-type (ddof=1)."""
+    if not rows:
+        return {}
+    keys = [k for k in DepthMetricTracker.METRIC_KEYS if k in rows[0]]
+    summary: dict[str, dict[str, Any]] = {}
+    n = len(rows)
+    for key in keys:
+        vals = [float(r[key]) for r in rows if key in r]
+        mean_val = sum(vals) / len(vals)
+        if len(vals) > 1:
+            var = sum((v - mean_val) ** 2 for v in vals) / (len(vals) - 1)
+            std_val = math.sqrt(var)
+        else:
+            std_val = 0.0
+        summary[key] = {
+            "mean": round(mean_val, 6),
+            "std": round(std_val, 6),
+            "formatted": f"{mean_val:.4f} ± {std_val:.4f}",
+            "n_seeds": n,
+        }
+    return summary
+
+
+def aggregate_ablation_results(
+    results_dir: str | Path,
+    variant_runs: dict[str, list[str]],
+    align_mode: str = "median",
+) -> dict[str, Any]:
+    """Agrège les JSON multi-graines (global et par séquence) pour le tableau d'ablation.
+
+    `variant_runs` associe un libellé de variante à la liste des noms de dossiers d'expérience
+    (ex. `{"baseline": ["c3vd_v3_baseline_seed42", "c3vd_v3_baseline_seed123", ...]}`).
+    """
+    base = Path(results_dir)
+    aggregated: dict[str, Any] = {}
+
+    for label, exp_dirs in variant_runs.items():
+        global_rows: list[dict[str, float]] = []
+        per_seq_rows: dict[str, list[dict[str, float]]] = {}
+        used_exps: list[str] = []
+
+        for exp_dir_name in exp_dirs:
+            eval_path = base / exp_dir_name / f"eval_test_{align_mode}.json"
+            if not eval_path.is_file():
+                continue
+            with eval_path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            used_exps.append(exp_dir_name)
+            if "metrics" in payload:
+                global_rows.append(payload["metrics"])
+            for seq_name, seq_metrics in payload.get("per_sequence_metrics", {}).items():
+                per_seq_rows.setdefault(seq_name, []).append(seq_metrics)
+
+        if not global_rows:
+            continue
+
+        aggregated[label] = {
+            "num_seeds": len(global_rows),
+            "experiments": used_exps,
+            "overall": _summarize_metric_dicts(global_rows),
+            "per_sequence": {
+                seq: _summarize_metric_dicts(rows)
+                for seq, rows in sorted(per_seq_rows.items())
+            },
+        }
+
+    return aggregated
 
 
 def run_smoke_evaluation(
@@ -213,7 +290,7 @@ def run_evaluation(
 
     align_mode = str(eval_cfg.get("align_mode", "median"))
     pred_is_disparity = bool(eval_cfg.get("pred_is_disparity", False))
-    metrics = evaluate_loader(
+    metrics, per_sequence_metrics = evaluate_loader(
         model=model,
         loader=loader,
         device=device,
@@ -222,6 +299,7 @@ def run_evaluation(
         min_depth=float(eval_cfg.get("min_depth", data_cfg.get("min_depth_mm", 1.0))),
         max_depth=float(eval_cfg.get("max_depth", data_cfg.get("max_depth_mm", 100.0))),
         max_batches=max_batches,
+        return_per_sequence=True,
     )
 
     exp_name = str(config.get("experiment_name", "eval_run"))
@@ -234,11 +312,14 @@ def run_evaluation(
         "pred_is_disparity": pred_is_disparity,
         "checkpoint": str(checkpoint_path) if checkpoint_path else None,
         "metrics": metrics,
+        "per_sequence_metrics": per_sequence_metrics,
     }
     out_json = save_json(payload, exp_dir / f"eval_{split}_{align_mode}.json")
     save_config_copy(config, exp_dir / "config_used.yaml")
     print(f"[OK] Évaluation terminée -> {out_json}")
     print(f"     Résultats : {metrics}")
+    if per_sequence_metrics:
+        print(f"     Par séquence : {per_sequence_metrics}")
     return payload
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import re
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +63,12 @@ def parse_args() -> argparse.Namespace:
         help="Remplace le nombre d'époques défini dans le fichier YAML.",
     )
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Remplace la graine aléatoire (met à jour _seedN dans experiment_name).",
+    )
+    parser.add_argument(
         "--max-batches",
         type=int,
         default=None,
@@ -89,6 +96,17 @@ def apply_train_overrides(config: dict[str, Any], args: argparse.Namespace) -> d
     """Applique les surcharges CLI à la configuration YAML."""
     if args.data_dir:
         config.setdefault("data", {})["dataset_path"] = args.data_dir
+    if getattr(args, "seed", None) is not None:
+        new_seed = int(args.seed)
+        config["seed"] = new_seed
+        exp_name = str(config.get("experiment_name", "train_run"))
+        if re.search(r"_seed\d+$", exp_name):
+            exp_name = re.sub(r"_seed\d+$", f"_seed{new_seed}", exp_name)
+        else:
+            exp_name = f"{exp_name}_seed{new_seed}"
+        config["experiment_name"] = exp_name
+        results_root = str(config.get("paths", {}).get("results_dir", "results"))
+        config.setdefault("paths", {})["checkpoint_dir"] = str(Path(results_root) / exp_name / "checkpoints")
     if args.results_dir:
         exp_name = str(config.get("experiment_name", "train_run"))
         config.setdefault("paths", {})["results_dir"] = args.results_dir
@@ -288,6 +306,13 @@ def run_training(
     max_depth = float(eval_cfg.get("max_depth", data_cfg.get("max_depth_mm", 100.0)))
     align_mode = str(eval_cfg.get("align_mode", "median"))
 
+    eval_json_path = exp_dir / f"eval_test_{align_mode}.json"
+    if resume_path and start_epoch > epochs and eval_json_path.is_file():
+        print(
+            f"[Skip] {exp_name} déjà terminé ({start_epoch - 1}/{epochs} époques) -> {eval_json_path}"
+        )
+        return best_ckpt_path if best_ckpt_path.is_file() else last_ckpt_path
+
     for epoch in range(start_epoch, epochs + 1):
         model.train()
         running: dict[str, float] = {"total": 0.0, "l1": 0.0, "silog": 0.0, "grad": 0.0, "normal": 0.0}
@@ -357,6 +382,7 @@ def run_training(
             f"loss={train_losses['total']:.4f} (l1={train_losses['l1']:.3f}, "
             f"grad={train_losses['grad']:.3f}, norm={train_losses['normal']:.3f}) | "
             f"val_AbsRel={val_abs_rel:.4f}, val_RMSE={val_metrics.get('rmse', 0.0):.3f}, "
+            f"val_GradMAE={val_metrics.get('grad_mae', 0.0):.3f}, "
             f"val_d1={val_metrics.get('delta_1', 0.0):.4f}"
         )
 
@@ -387,7 +413,7 @@ def run_training(
     # Évaluation finale sur le split test avec le meilleur checkpoint
     if best_ckpt_path.is_file():
         load_checkpoint(best_ckpt_path, model=model, device=device)
-    test_metrics = evaluate_loader(
+    test_metrics, per_sequence_metrics = evaluate_loader(
         model=model,
         loader=test_loader,
         device=device,
@@ -396,9 +422,11 @@ def run_training(
         min_depth=min_depth,
         max_depth=max_depth,
         max_batches=max_batches,
+        return_per_sequence=True,
     )
     test_payload = {
         "experiment_name": exp_name,
+        "seed": int(config.get("seed", 42)),
         "dataset": data_cfg["dataset_name"],
         "split": "test",
         "align_mode": align_mode,
@@ -406,9 +434,12 @@ def run_training(
         "trainable_params": trainable_params,
         "total_params": total_params,
         "metrics": test_metrics,
+        "per_sequence_metrics": per_sequence_metrics,
     }
     save_json(test_payload, exp_dir / f"eval_test_{align_mode}.json")
     print(f"[OK] Entraînement terminé. Test final : {test_metrics}")
+    if per_sequence_metrics:
+        print(f"[OK] Résultats par séquence (test) : {per_sequence_metrics}")
     return best_ckpt_path if best_ckpt_path.is_file() else last_ckpt_path
 
 

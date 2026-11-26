@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import cv2
 import numpy as np
@@ -94,6 +94,7 @@ def build_dataset(config: dict[str, Any], split: str) -> C3VDDataset | SimCol3DD
 
     if name == "c3vd":
         common_kwargs["expected_sequences"] = data_cfg.get("expected_sequences")
+        common_kwargs["include_sequences"] = data_cfg.get("selected_sequences")
         return C3VDDataset(**common_kwargs)
     if name == "simcol3d":
         common_kwargs["depth_max_mm"] = float(data_cfg.get("depth_max_mm", 200.0))
@@ -132,20 +133,23 @@ def resolve_dataset_dir(
     local_data_base: str | Path,
     demo_fallback_dir: str | Path,
     expected_sequences: list[str] | tuple[str, ...] | None = None,
+    selected_sequences: Iterable[str] | None = None,
     allow_demo_fallback: bool | None = None,
     num_demo_sequences: int = 4,
     frames_per_seq: int = 6,
 ) -> tuple[Path, str, bool]:
     """Résout le dossier du dataset depuis Drive/local (y compris c3vd_zips mixte zip+dossiers).
 
-    Si `expected_sequences` est fourni et `allow_demo_fallback` n'est pas forcé à True,
-    échoue explicitement si aucun dataset réel n'est trouvé au lieu de basculer en démo.
+    Si `selected_sequences` est fourni, ne copie/extrait et ne vérifie que ces séquences.
+    Si `expected_sequences` ou `selected_sequences` est fourni et `allow_demo_fallback` n'est pas
+    forcé à True, échoue explicitement si aucun dataset réel n'est trouvé.
     """
     drive_base = Path(drive_data_base)
     local_base = Path(local_data_base)
     name = dataset_name.lower()
+    selected_list = [str(s) for s in selected_sequences] if selected_sequences is not None else None
     if allow_demo_fallback is None:
-        allow_demo_fallback = not bool(expected_sequences)
+        allow_demo_fallback = not bool(expected_sequences or selected_list)
 
     if name == "c3vd":
         zips_dir = drive_base / "c3vd_zips"
@@ -175,8 +179,20 @@ def resolve_dataset_dir(
         if source_dirs:
             for src_dir in source_dirs:
                 if src_dir.resolve() != target_dir.resolve():
-                    prepare_c3vd_from_source(src_dir, target_dir)
-            discover_c3vd_records(target_dir, expected_sequences=expected_sequences)
+                    prepare_c3vd_from_source(src_dir, target_dir, sequences=selected_list)
+            discover_c3vd_records(
+                target_dir,
+                expected_sequences=expected_sequences,
+                include_sequences=selected_list,
+            )
+            return target_dir, "c3vd", False
+
+        if target_dir.is_dir() and any(target_dir.iterdir()):
+            discover_c3vd_records(
+                target_dir,
+                expected_sequences=expected_sequences,
+                include_sequences=selected_list,
+            )
             return target_dir, "c3vd", False
 
     else:

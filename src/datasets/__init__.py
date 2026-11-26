@@ -5,7 +5,9 @@ from src.datasets.base import (
     SampleRecord,
     assign_sequence_splits,
     detect_specular_mask,
+    extract_texture_group,
     summarize_records_by_sequence,
+    validate_no_texture_leakage,
 )
 from src.datasets.c3vd import C3VDDataset, discover_c3vd_records, prepare_c3vd_from_source
 from src.datasets.factory import build_dataset, create_synthetic_c3vd_demo, resolve_dataset_dir
@@ -22,8 +24,10 @@ __all__ = [
     "create_synthetic_c3vd_demo",
     "detect_specular_mask",
     "discover_c3vd_records",
+    "extract_texture_group",
     "make_synthetic_endoscopy_batch",
     "prepare_c3vd_from_source",
     "resolve_dataset_dir",
     "summarize_records_by_sequence",
+    "validate_no_texture_leakage",
 ]

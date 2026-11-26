@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,6 +62,41 @@ def summarize_records_by_sequence(records: list[SampleRecord]) -> dict[str, int]
     return {seq: counts[seq] for seq in sorted(counts)}
 
 
+_C3VD_TEXTURE_RE = re.compile(r"^(.+?)_(t\d+)(?:_[a-z0-9]+)?$", re.IGNORECASE)
+
+
+def extract_texture_group(sequence_name: str, by_texture_tag_only: bool = False) -> str:
+    """Extrait l'identifiant de texture C3VD afin d'éviter toute fuite entre splits.
+
+    Exemples :
+    - `trans_t3_a`, `trans_t3_b` -> `"trans_t3"` (ou `"t3"` si `by_texture_tag_only=True`).
+    - Hors convention C3VD `<segment>_t<id>_...`, retourne `sequence_name`.
+    """
+    match = _C3VD_TEXTURE_RE.match(sequence_name)
+    if not match:
+        return sequence_name
+    segment, tex_tag = match.group(1), match.group(2).lower()
+    return tex_tag if by_texture_tag_only else f"{segment}_{tex_tag}"
+
+
+def validate_no_texture_leakage(
+    assignment: dict[str, list[str]],
+    by_texture_tag_only: bool = False,
+) -> None:
+    """Vérifie qu'aucun groupe de texture n'est partagé entre deux splits (train/val/test)."""
+    group_to_splits: dict[str, set[str]] = {}
+    for split_name, seqs in assignment.items():
+        for seq in seqs:
+            grp = extract_texture_group(seq, by_texture_tag_only=by_texture_tag_only)
+            group_to_splits.setdefault(grp, set()).add(split_name)
+
+    leaks = {grp: sorted(splits) for grp, splits in group_to_splits.items() if len(splits) > 1}
+    if leaks:
+        raise ValueError(
+            f"Fuite de texture détectée entre splits (même texture dans train/val/test) : {leaks}"
+        )
+
+
 def assign_sequence_splits(
     records: list[SampleRecord],
     val_ratio: float = 0.15,
@@ -68,13 +104,13 @@ def assign_sequence_splits(
     seed: int = 42,
     sequence_splits: dict[str, list[str]] | None = None,
 ) -> dict[str, list[str]]:
-    """Assigne des séquences entières à train / val / test sans jamais couper une séquence.
+    """Assigne des séquences entières à train / val / test sans fuite temporelle ni de texture.
 
-    - Si `sequence_splits` est fourni, utilise ces listes explicitement.
-    - Si exactement 3 séquences sont présentes, assigne automatiquement par taille décroissante :
-      plus grande séquence -> train, 2e -> val, plus petite -> test
-      (ex. train=cecum_t1_a, val=desc_t4_a, test=trans_t1_a).
-    - Si >= 4 séquences sont présentes, découpe aléatoirement (seed) par séquence entière.
+    - Si `sequence_splits` est fourni, vérifie présence, unicité et absence de fuite `(segment, tN)`.
+    - Sinon, regroupe d'abord par identifiant de texture (ex. `trans_t3_a` et `trans_t3_b` ensemble).
+      Si `>= 3` tags globaux `tN` distincts existent (ex. `t1..t4`), regroupe par `tN`.
+      Si exactement 3 groupes existent, assigne par taille décroissante (train -> val -> test).
+      Si `>= 4` groupes existent, découpe aléatoirement (selon `seed`) par groupe de texture entier.
     """
     counts = summarize_records_by_sequence(records)
     available = set(counts.keys())
@@ -95,35 +131,47 @@ def assign_sequence_splits(
                 raise ValueError(f"Séquences en double entre splits : {sorted(overlap)}")
             seen.update(seqs)
             assignment[key] = seqs
+        validate_no_texture_leakage(assignment, by_texture_tag_only=False)
         return assignment
 
-    if len(counts) < 3:
+    # Regroupement par texture globale `tN` si >= 3 tags distincts, sinon par `(segment, tN)`
+    by_tag: dict[str, list[str]] = {}
+    by_seg_tag: dict[str, list[str]] = {}
+    for seq in sorted(counts):
+        by_tag.setdefault(extract_texture_group(seq, by_texture_tag_only=True), []).append(seq)
+        by_seg_tag.setdefault(extract_texture_group(seq, by_texture_tag_only=False), []).append(seq)
+
+    groups_map = by_tag if len(by_tag) >= 3 else by_seg_tag
+    if len(groups_map) < 3:
         raise ValueError(
-            f"Découpage par séquence entière impossible avec {len(counts)} séquence(s) : {counts}. "
-            "Il faut au moins 3 séquences complètes (ex. cecum_t1_a, desc_t4_a, trans_t1_a) "
-            "pour séparer train, val et test sans couper une séquence."
+            f"Découpage sans fuite de texture impossible avec {len(groups_map)} groupe(s) : "
+            f"{dict(sorted(groups_map.items()))}. "
+            "Il faut au moins 3 groupes de texture distincts pour séparer train, val et test."
         )
 
-    if len(counts) == 3:
-        by_size = sorted(counts.keys(), key=lambda s: (-counts[s], s))
+    if len(groups_map) == 3:
+        group_sizes = {
+            grp: sum(counts[s] for s in seqs) for grp, seqs in groups_map.items()
+        }
+        ordered_groups = sorted(groups_map.keys(), key=lambda g: (-group_sizes[g], g))
         return {
-            "train": [by_size[0]],
-            "val": [by_size[1]],
-            "test": [by_size[2]],
+            "train": sorted(groups_map[ordered_groups[0]]),
+            "val": sorted(groups_map[ordered_groups[1]]),
+            "test": sorted(groups_map[ordered_groups[2]]),
         }
 
-    sequences = sorted(counts.keys())
+    group_names = sorted(groups_map.keys())
     rng = random.Random(seed)
-    rng.shuffle(sequences)
-    n_val = max(1, round(len(sequences) * val_ratio))
-    n_test = max(1, round(len(sequences) * test_ratio))
-    if n_val + n_test >= len(sequences):
+    rng.shuffle(group_names)
+    n_val = max(1, round(len(group_names) * val_ratio))
+    n_test = max(1, round(len(group_names) * test_ratio))
+    if n_val + n_test >= len(group_names):
         n_val = 1
         n_test = 1
     return {
-        "val": sorted(sequences[:n_val]),
-        "test": sorted(sequences[n_val : n_val + n_test]),
-        "train": sorted(sequences[n_val + n_test :]),
+        "val": sorted(s for g in group_names[:n_val] for s in groups_map[g]),
+        "test": sorted(s for g in group_names[n_val : n_val + n_test] for s in groups_map[g]),
+        "train": sorted(s for g in group_names[n_val + n_test :] for s in groups_map[g]),
     }
 
 

@@ -113,11 +113,28 @@ def compute_depth_metrics_single(
     rmse = torch.sqrt((diff**2).mean()).item()
     rmse_log = torch.sqrt(((torch.log(p_val) - torch.log(gt_val)) ** 2).mean()).item()
 
+    # MAE des gradients spatiaux (mm/px) sur paires de pixels adjacents tous deux valides
+    grad_errs: list[torch.Tensor] = []
+    if p.ndim == 2 and p.shape[1] > 1:
+        mx = m[:, 1:] & m[:, :-1]
+        if mx.any():
+            dx_p = p[:, 1:] - p[:, :-1]
+            dx_gt = gt[:, 1:] - gt[:, :-1]
+            grad_errs.append(torch.abs(dx_p[mx] - dx_gt[mx]))
+    if p.ndim == 2 and p.shape[0] > 1:
+        my = m[1:, :] & m[:-1, :]
+        if my.any():
+            dy_p = p[1:, :] - p[:-1, :]
+            dy_gt = gt[1:, :] - gt[:-1, :]
+            grad_errs.append(torch.abs(dy_p[my] - dy_gt[my]))
+    grad_mae = torch.cat(grad_errs).mean().item() if grad_errs else 0.0
+
     return {
         "abs_rel": abs_rel,
         "sq_rel": sq_rel,
         "rmse": rmse,
         "rmse_log": rmse_log,
+        "grad_mae": grad_mae,
         "delta_1": delta_1,
         "delta_2": delta_2,
         "delta_3": delta_3,
@@ -125,13 +142,24 @@ def compute_depth_metrics_single(
 
 
 class DepthMetricTracker:
-    """Accumule les métriques image par image sans saturer la RAM."""
+    """Accumule les métriques image par image (globales et par séquence) sans saturer la RAM."""
 
-    METRIC_KEYS = ("abs_rel", "sq_rel", "rmse", "rmse_log", "delta_1", "delta_2", "delta_3")
+    METRIC_KEYS = (
+        "abs_rel",
+        "sq_rel",
+        "rmse",
+        "rmse_log",
+        "grad_mae",
+        "delta_1",
+        "delta_2",
+        "delta_3",
+    )
 
     def __init__(self) -> None:
         self.sums: dict[str, float] = {k: 0.0 for k in self.METRIC_KEYS}
         self.count: int = 0
+        self.seq_sums: dict[str, dict[str, float]] = {}
+        self.seq_counts: dict[str, int] = {}
 
     def update_batch(
         self,
@@ -142,6 +170,7 @@ class DepthMetricTracker:
         align_mode: AlignMode = "median",
         min_depth: float = 1e-3,
         max_depth: float = 200.0,
+        sequences: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         """Aligne et évalue chaque image du batch."""
         batch_size = pred.shape[0]
@@ -164,8 +193,29 @@ class DepthMetricTracker:
                 self.sums[key] += metrics[key]
             self.count += 1
 
+            if sequences is not None and idx < len(sequences):
+                seq = str(sequences[idx])
+                if seq not in self.seq_sums:
+                    self.seq_sums[seq] = {k: 0.0 for k in self.METRIC_KEYS}
+                    self.seq_counts[seq] = 0
+                for key in self.METRIC_KEYS:
+                    self.seq_sums[seq][key] += metrics[key]
+                self.seq_counts[seq] += 1
+
     def compute(self) -> dict[str, float]:
         """Retourne la moyenne de chaque métrique sur toutes les images évaluées."""
         if self.count == 0:
             return {k: 0.0 for k in self.METRIC_KEYS}
         return {k: round(self.sums[k] / self.count, 6) for k in self.METRIC_KEYS}
+
+    def compute_per_sequence(self) -> dict[str, dict[str, float]]:
+        """Retourne les métriques moyennes détaillées par nom de séquence."""
+        out: dict[str, dict[str, float]] = {}
+        for seq in sorted(self.seq_counts):
+            cnt = self.seq_counts[seq]
+            if cnt == 0:
+                continue
+            seq_metrics = {k: round(self.seq_sums[seq][k] / cnt, 6) for k in self.METRIC_KEYS}
+            seq_metrics["num_evaluated_frames"] = float(cnt)
+            out[seq] = seq_metrics
+        return out
