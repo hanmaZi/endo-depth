@@ -9,6 +9,7 @@ Exemples :
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 from pathlib import Path
@@ -20,7 +21,12 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from src.datasets import build_dataset, make_synthetic_endoscopy_batch
+from src.datasets import (
+    build_dataset,
+    extract_colon_model,
+    make_synthetic_endoscopy_batch,
+    summarize_records_by_sequence,
+)
 from src.metrics import DepthMetricTracker
 from src.models import SmokeDepthNet, build_model
 from src.utils import (
@@ -151,25 +157,26 @@ def evaluate_loader(
 
 
 def _summarize_metric_dicts(rows: list[dict[str, float]]) -> dict[str, dict[str, Any]]:
-    """Agrège une liste de dictionnaires de métriques en moyenne ± écart-type (ddof=1)."""
+    """Agrège une liste de dictionnaires de métriques (moyenne ± écart-type ddof=1 si n>=2)."""
     if not rows:
         return {}
     keys = [k for k in DepthMetricTracker.METRIC_KEYS if k in rows[0]]
     summary: dict[str, dict[str, Any]] = {}
-    n = len(rows)
     for key in keys:
         vals = [float(r[key]) for r in rows if key in r]
         mean_val = sum(vals) / len(vals)
         if len(vals) > 1:
             var = sum((v - mean_val) ** 2 for v in vals) / (len(vals) - 1)
-            std_val = math.sqrt(var)
+            std_val: float | None = math.sqrt(var)
+            formatted = f"{mean_val:.4f} ± {std_val:.4f}"
         else:
-            std_val = 0.0
+            std_val = None
+            formatted = f"{mean_val:.4f} (n=1)"
         summary[key] = {
             "mean": round(mean_val, 6),
-            "std": round(std_val, 6),
-            "formatted": f"{mean_val:.4f} ± {std_val:.4f}",
-            "n_seeds": n,
+            "std": round(std_val, 6) if std_val is not None else None,
+            "formatted": formatted,
+            "n_seeds": len(vals),
         }
     return summary
 
@@ -308,6 +315,9 @@ def run_evaluation(
         "experiment_name": exp_name,
         "dataset": data_cfg["dataset_name"],
         "split": split,
+        "split_sequences": summarize_records_by_sequence(dataset.records)
+        if hasattr(dataset, "records")
+        else {},
         "align_mode": align_mode,
         "pred_is_disparity": pred_is_disparity,
         "checkpoint": str(checkpoint_path) if checkpoint_path else None,
@@ -321,6 +331,79 @@ def run_evaluation(
     if per_sequence_metrics:
         print(f"     Par séquence : {per_sequence_metrics}")
     return payload
+
+
+def evaluate_checkpoint_on_sequences(
+    config: dict[str, Any],
+    dataset_dir: str | Path,
+    test_sequences: list[str],
+    checkpoint_path: str | Path | None = None,
+    align_mode: str = "median",
+    max_batches: int | None = None,
+    train_sequences_used: list[str] | None = None,
+) -> dict[str, Any]:
+    """Réévalue n'importe quel modèle (Zero-Shot, v2, v3...) sur un même jeu de séquences test.
+
+    Détecte automatiquement si un modèle de côlon présent en test figurait déjà dans le train
+    d'origine (`has_model_leakage`) pour signaler tout biais éventuel.
+    """
+    cfg = copy.deepcopy(config)
+    cfg.setdefault("data", {})["dataset_name"] = "c3vd"
+    cfg["data"]["dataset_path"] = str(dataset_dir)
+    cfg["data"]["selected_sequences"] = list(test_sequences)
+    cfg["data"]["expected_sequences"] = list(test_sequences)
+    cfg["data"]["sequence_splits"] = {"train": [], "val": [], "test": list(test_sequences)}
+
+    device = get_device(cfg.get("device", "auto"))
+    eval_cfg = cfg.get("evaluation", {})
+    dataset = build_dataset(cfg, split="test")
+    num_workers = 0 if device.type == "cpu" else int(cfg["data"].get("num_workers", 2))
+    loader = DataLoader(
+        dataset,
+        batch_size=int(cfg["data"].get("batch_size", 4)),
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=(device.type == "cuda"),
+    )
+
+    model = build_model(cfg).to(device)
+    ckpt_epoch = None
+    if checkpoint_path is not None:
+        ckpt = load_checkpoint(checkpoint_path, model=model, device=device)
+        ckpt_epoch = int(ckpt.get("epoch", 0))
+
+    pred_is_disparity = bool(eval_cfg.get("pred_is_disparity", False))
+    metrics, per_seq = evaluate_loader(
+        model=model,
+        loader=loader,
+        device=device,
+        pred_is_disparity=pred_is_disparity,
+        align_mode=align_mode,
+        min_depth=float(eval_cfg.get("min_depth", cfg["data"].get("min_depth_mm", 1.0))),
+        max_depth=float(eval_cfg.get("max_depth", cfg["data"].get("max_depth_mm", 100.0))),
+        max_batches=max_batches,
+        return_per_sequence=True,
+    )
+
+    train_seqs = list(train_sequences_used or [])
+    train_models = sorted({extract_colon_model(s) for s in train_seqs})
+    test_models = sorted({extract_colon_model(s) for s in test_sequences})
+    overlapping_models = sorted(set(train_models) & set(test_models))
+
+    return {
+        "experiment_name": str(cfg.get("experiment_name", "eval_run")),
+        "checkpoint": str(checkpoint_path) if checkpoint_path else None,
+        "checkpoint_epoch": ckpt_epoch,
+        "align_mode": align_mode,
+        "pred_is_disparity": pred_is_disparity,
+        "test_sequences": summarize_records_by_sequence(dataset.records),
+        "train_models": train_models,
+        "test_models": test_models,
+        "overlapping_models": overlapping_models,
+        "has_model_leakage": bool(overlapping_models),
+        "metrics": metrics,
+        "per_sequence_metrics": per_seq,
+    }
 
 
 def main() -> None:

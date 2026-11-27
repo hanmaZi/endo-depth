@@ -1,13 +1,13 @@
 # v3 Ablation 4/4 : Contribution complète (Gradients log-profondeur + Normales 3D) sur Lot 2 C3VD
 
-experiment_name: "c3vd_v3_grad_norm_seed42"
+experiment_name: "c3vd_cv_sigmoid_grad_norm_seed42"
 seed: 42
 device: "auto"
 
 paths:
   data_dir: "data"
   results_dir: "results"
-  checkpoint_dir: "results/c3vd_v3_grad_norm_seed42/checkpoints"
+  checkpoint_dir: "results/c3vd_cv_sigmoid_grad_norm_seed42/checkpoints"
 
 data:
   dataset_name: "c3vd"
@@ -17,6 +17,7 @@ data:
   max_depth_mm: 100.0
   val_ratio: 0.15
   test_ratio: 0.15
+  split_by: "model"
   expected_sequences:
     - "cecum_t1_a"
     - "cecum_t2_a"
@@ -29,9 +30,9 @@ data:
     - "trans_t3_b"
   selected_sequences: null
   sequence_splits:
-    train: ["cecum_t2_a", "sigmoid_t2_a", "sigmoid_t3_a", "trans_t2_a", "trans_t3_a", "trans_t3_b"]
+    train: ["cecum_t1_a", "cecum_t2_a", "trans_t1_a", "trans_t2_a", "trans_t3_a", "trans_t3_b"]
     val: ["desc_t4_a"]
-    test: ["cecum_t1_a", "trans_t1_a"]
+    test: ["sigmoid_t2_a", "sigmoid_t3_a"]
   batch_size: 4
   num_workers: 2
   augment: true

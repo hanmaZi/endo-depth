@@ -79,6 +79,17 @@ def extract_texture_group(sequence_name: str, by_texture_tag_only: bool = False)
     return tex_tag if by_texture_tag_only else f"{segment}_{tex_tag}"
 
 
+def extract_colon_model(sequence_name: str) -> str:
+    """Extrait le modèle de côlon C3VD (`cecum`, `desc`, `sigmoid`, `trans`).
+
+    Hors convention `<modele>_t<id>_...`, retourne `sequence_name`.
+    """
+    match = _C3VD_TEXTURE_RE.match(sequence_name)
+    if not match:
+        return sequence_name
+    return match.group(1).lower()
+
+
 def validate_no_texture_leakage(
     assignment: dict[str, list[str]],
     by_texture_tag_only: bool = False,
@@ -97,20 +108,35 @@ def validate_no_texture_leakage(
         )
 
 
+def validate_no_model_leakage(assignment: dict[str, list[str]]) -> None:
+    """Vérifie qu'aucun modèle de côlon (cecum/desc/sigmoid/trans) n'apparaît dans deux splits."""
+    model_to_splits: dict[str, set[str]] = {}
+    for split_name, seqs in assignment.items():
+        for seq in seqs:
+            model = extract_colon_model(seq)
+            model_to_splits.setdefault(model, set()).add(split_name)
+
+    leaks = {m: sorted(splits) for m, splits in model_to_splits.items() if len(splits) > 1}
+    if leaks:
+        raise ValueError(
+            f"Fuite de modèle de côlon détectée entre splits (même modèle en train/val/test) : {leaks}"
+        )
+
+
 def assign_sequence_splits(
     records: list[SampleRecord],
     val_ratio: float = 0.15,
     test_ratio: float = 0.15,
     seed: int = 42,
     sequence_splits: dict[str, list[str]] | None = None,
+    split_by: str = "model",
 ) -> dict[str, list[str]]:
-    """Assigne des séquences entières à train / val / test sans fuite temporelle ni de texture.
+    """Assigne des séquences entières à train / val / test sans fuite anatomique ni temporelle.
 
-    - Si `sequence_splits` est fourni, vérifie présence, unicité et absence de fuite `(segment, tN)`.
-    - Sinon, regroupe d'abord par identifiant de texture (ex. `trans_t3_a` et `trans_t3_b` ensemble).
-      Si `>= 3` tags globaux `tN` distincts existent (ex. `t1..t4`), regroupe par `tN`.
-      Si exactement 3 groupes existent, assigne par taille décroissante (train -> val -> test).
-      Si `>= 4` groupes existent, découpe aléatoirement (selon `seed`) par groupe de texture entier.
+    - Par défaut (`split_by='model'`), regroupe **tout un même modèle de côlon** du même côté
+      (quelle que soit la texture `t1..t4`) afin de tester la généralisation sur anatomie inédite.
+    - Si `split_by='texture'`, regroupe par identifiant de texture uniquement.
+    - Si `sequence_splits` est fourni, vérifie présence, unicité et absence de fuite.
     """
     counts = summarize_records_by_sequence(records)
     available = set(counts.keys())
@@ -132,21 +158,29 @@ def assign_sequence_splits(
             seen.update(seqs)
             assignment[key] = seqs
         validate_no_texture_leakage(assignment, by_texture_tag_only=False)
+        if split_by == "model":
+            validate_no_model_leakage(assignment)
         return assignment
 
-    # Regroupement par texture globale `tN` si >= 3 tags distincts, sinon par `(segment, tN)`
-    by_tag: dict[str, list[str]] = {}
-    by_seg_tag: dict[str, list[str]] = {}
-    for seq in sorted(counts):
-        by_tag.setdefault(extract_texture_group(seq, by_texture_tag_only=True), []).append(seq)
-        by_seg_tag.setdefault(extract_texture_group(seq, by_texture_tag_only=False), []).append(seq)
+    if split_by == "model":
+        groups_map: dict[str, list[str]] = {}
+        for seq in sorted(counts):
+            groups_map.setdefault(extract_colon_model(seq), []).append(seq)
+    elif split_by == "texture":
+        by_tag: dict[str, list[str]] = {}
+        by_seg_tag: dict[str, list[str]] = {}
+        for seq in sorted(counts):
+            by_tag.setdefault(extract_texture_group(seq, by_texture_tag_only=True), []).append(seq)
+            by_seg_tag.setdefault(extract_texture_group(seq, by_texture_tag_only=False), []).append(seq)
+        groups_map = by_tag if len(by_tag) >= 3 else by_seg_tag
+    else:
+        raise ValueError(f"split_by inconnu : {split_by}. Attendu : 'model' ou 'texture'.")
 
-    groups_map = by_tag if len(by_tag) >= 3 else by_seg_tag
     if len(groups_map) < 3:
         raise ValueError(
-            f"Découpage sans fuite de texture impossible avec {len(groups_map)} groupe(s) : "
+            f"Découpage impossible avec {len(groups_map)} groupe(s) ({split_by=}) : "
             f"{dict(sorted(groups_map.items()))}. "
-            "Il faut au moins 3 groupes de texture distincts pour séparer train, val et test."
+            "Il faut au moins 3 groupes distincts (ex. 3 modèles de côlon) pour séparer train, val et test."
         )
 
     if len(groups_map) == 3:
@@ -182,8 +216,9 @@ def split_records_by_sequence(
     test_ratio: float = 0.15,
     seed: int = 42,
     sequence_splits: dict[str, list[str]] | None = None,
+    split_by: str = "model",
 ) -> list[SampleRecord]:
-    """Sépare les échantillons en train/val/test par séquence entière (aucune fuite temporelle)."""
+    """Sépare les échantillons en train/val/test par séquence entière (aucune fuite)."""
     if split not in {"train", "val", "test", "all"}:
         raise ValueError(f"Split inconnu : {split}. Attendu : train, val, test ou all.")
     if split == "all" or not records:
@@ -195,6 +230,7 @@ def split_records_by_sequence(
         test_ratio=test_ratio,
         seed=seed,
         sequence_splits=sequence_splits,
+        split_by=split_by,
     )
     target_seqs = set(assignment[split])
     return [rec for rec in records if rec.sequence_name in target_seqs]

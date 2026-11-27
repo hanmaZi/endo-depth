@@ -26,6 +26,25 @@ from src.datasets.base import (
 
 _IGNORED_NAMES = {"__MACOSX", "desktop.ini", "Thumbs.db"}
 
+# Plis de validation croisée par modèle de côlon (aucun modèle partagé entre train, val et test)
+C3VD_MODEL_CV_FOLDS: dict[str, dict[str, list[str]]] = {
+    "sigmoid": {
+        "train": ["cecum_t1_a", "cecum_t2_a", "trans_t1_a", "trans_t2_a", "trans_t3_a", "trans_t3_b"],
+        "val": ["desc_t4_a"],
+        "test": ["sigmoid_t2_a", "sigmoid_t3_a"],
+    },
+    "trans": {
+        "train": ["cecum_t1_a", "cecum_t2_a", "sigmoid_t2_a", "sigmoid_t3_a"],
+        "val": ["desc_t4_a"],
+        "test": ["trans_t1_a", "trans_t2_a", "trans_t3_a", "trans_t3_b"],
+    },
+    "cecum": {
+        "train": ["sigmoid_t2_a", "sigmoid_t3_a", "trans_t1_a", "trans_t2_a", "trans_t3_a", "trans_t3_b"],
+        "val": ["desc_t4_a"],
+        "test": ["cecum_t1_a", "cecum_t2_a"],
+    },
+}
+
 
 def _is_ignored_entry(path: Path) -> bool:
     return path.name.startswith(".") or path.name in _IGNORED_NAMES
@@ -401,6 +420,7 @@ class C3VDDataset(BaseEndoscopyDataset):
         expected_sequences: Iterable[str] | None = None,
         sequence_splits: dict[str, list[str]] | None = None,
         include_sequences: Iterable[str] | None = None,
+        split_by: str = "model",
     ) -> None:
         all_records = discover_c3vd_records(
             root_dir,
@@ -418,6 +438,7 @@ class C3VDDataset(BaseEndoscopyDataset):
             test_ratio=test_ratio,
             seed=seed,
             sequence_splits=sequence_splits,
+            split_by=split_by,
         )
         super().__init__(
             records=split_records,

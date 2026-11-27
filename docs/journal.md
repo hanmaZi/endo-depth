@@ -114,3 +114,23 @@ Ce journal trace chronologiquement ce qui a été fait, les choix techniques pri
   - Ajout de `grad_mae` (MAE des gradients spatiaux en mm/px) et sauvegarde systématique de `per_sequence_metrics` dans [`src/metrics/depth_metrics.py`](../src/metrics/depth_metrics.py), [`src/eval.py`](../src/eval.py) et [`src/train.py`](../src/train.py).
   - Grille qualitative dans [`notebooks/03_train_lora_contrib.ipynb`](../notebooks/03_train_lora_contrib.ipynb) : `RGB | Vérité terrain | Baseline v3 | Contrib v3 | Erreur |Baseline - GT| | Erreur |Contrib - GT|`.
   - Préparation de l'ablation isolée en 4 variantes ([`configs/c3vd_v3_*.yaml`](../configs)) : `baseline`, `grad_only`, `norm_only`, `grad_norm`, sur 3 graines (`42, 123, 2026`), agrégée en moyenne ± écart-type globalement et par séquence de test via [`aggregate_ablation_results`](../src/eval.py).
+
+## 27 novembre 2026 — Résultats Colab T4 `v3` (Lot 2 par texture), alerte biais et passage au découpage par modèle de côlon
+- **Séquences exactes du run `v3` (`seed=42`, découpage par texture) :**
+  - `train` (`6` séquences, textures `t2` + `t3`) : `cecum_t2_a`, `sigmoid_t2_a`, `sigmoid_t3_a`, `trans_t2_a`, `trans_t3_a`, `trans_t3_b`.
+  - `val` (`1` séquence, texture `t4`) : `desc_t4_a`.
+  - `test` (`2` séquences, texture `t1`, `337` images au total) : `cecum_t1_a` (`276` images), `trans_t1_a` (`61` images).
+- **Résultats mesurés sur ce split `v3` (`eval_test_median.json`, `337` images test) :**
+  - `Baseline LoRA v3 (seed=42)` — global : `AbsRel = 0.084512`, `SqRel = 0.336909`, `RMSE = 3.807024`, `RMSE_log = 0.105744`, `Grad_MAE = 0.186133`, `δ < 1.25 = 0.957172`, `δ < 1.25² = 0.999425`, `δ < 1.25³ = 1.0`.
+    - Par séquence : `cecum_t1_a` (`276` img : `AbsRel = 0.083245`, `RMSE = 4.108322`, `Grad_MAE = 0.186751`, `δ < 1.25 = 0.964369`) ; `trans_t1_a` (`61` img : `AbsRel = 0.090246`, `RMSE = 2.443771`, `Grad_MAE = 0.183332`, `δ < 1.25 = 0.924606`).
+  - `Contrib LoRA v3 (seed=42)` — global : `AbsRel = 0.080295`, `SqRel = 0.308591`, `RMSE = 3.631003`, `RMSE_log = 0.100533`, `Grad_MAE = 0.179712`, `δ < 1.25 = 0.964567`, `δ < 1.25² = 0.999420`, `δ < 1.25³ = 1.0`.
+    - Par séquence : `cecum_t1_a` (`276` img : `AbsRel = 0.078803`, `RMSE = 3.914834`, `Grad_MAE = 0.180159`, `δ < 1.25 = 0.972348`) ; `trans_t1_a` (`61` img : `AbsRel = 0.087044`, `RMSE = 2.346784`, `Grad_MAE = 0.177693`, `δ < 1.25 = 0.929361`).
+  - Observations validation (`desc_t4_a`, segment inédit en `v2` et `v3`) : `val_AbsRel` descend à `~0.114` en `v3` (vs `~0.171` en `v2`), et `val_GradMAE` de `Contrib v3` reste inférieur à `Baseline v3` sur les 12 époques (`~0.1769 → ~0.1636–0.1642` vs `~0.1800 → ~0.1654–0.1657`).
+- **Point de vigilance méthodologique (hypothèse à confirmer) :**
+  - **Les splits précédents (`v1`/`v2` sur une seule séquence train et surtout `v3` découpé par texture `t1` vs `t2+t3`) sont possiblement biaisés (hypothèse à confirmer).** En particulier, dans le split `v3`, les mêmes modèles physiques de côlon (`cecum` et `trans`) apparaissent à la fois dans `train` (`cecum_t2_a`, `trans_t2_a`, `trans_t3_a`, `trans_t3_b`) et dans `test` (`cecum_t1_a`, `trans_t1_a`) : **hypothèse :** le saut massif sur `test` (`AbsRel ~0.16 → ~0.08`) peut refléter en partie la mémorisation de la géométrie du segment malgré un changement de texture, en plus de l'augmentation du nombre d'images. De plus, `n=1` graine ne permet pas de quantifier la variance (`(n=1)` au lieu de `± 0.0000`).
+- **Nouveau protocole strict par modèle de côlon (zéro fuite anatomique) :**
+  - [`extract_colon_model`](../src/datasets/base.py) et [`validate_no_model_leakage`](../src/datasets/base.py) imposent qu'un même modèle anatomique (`cecum`, `desc`, `sigmoid`, `trans`) reste intégralement dans un seul split, quelle que soit la texture.
+  - Plis de validation croisée par modèle ([`C3VD_MODEL_CV_FOLDS`](../src/datasets/c3vd.py)) :
+    - **Pli 1 (`sigmoid`) :** `train = cecum + trans` (`6` séq.), `val = desc_t4_a`, `test = sigmoid` (`sigmoid_t2_a`, `sigmoid_t3_a`).
+    - **Pli 2 (`trans`, validation croisée) :** `train = cecum + sigmoid` (`4` séq.), `val = desc_t4_a`, `test = trans` (`trans_t1_a`, `trans_t2_a`, `trans_t3_a`, `trans_t3_b`).
+  - Réévaluation de `Zero-Shot`, `v2` (Lot 1, sans fuite sur `sigmoid` ni `trans`) et des runs par modèle sur ce **même jeu test**, plus ablation isolée à **3 graines** (`42, 123, 2026`) via [`evaluate_checkpoint_on_sequences`](../src/eval.py) et [`_summarize_metric_dicts`](../src/eval.py) (`n=1` affiché explicitement quand une seule graine est présente).

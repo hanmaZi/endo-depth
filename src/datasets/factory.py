@@ -95,6 +95,7 @@ def build_dataset(config: dict[str, Any], split: str) -> C3VDDataset | SimCol3DD
     if name == "c3vd":
         common_kwargs["expected_sequences"] = data_cfg.get("expected_sequences")
         common_kwargs["include_sequences"] = data_cfg.get("selected_sequences")
+        common_kwargs["split_by"] = str(data_cfg.get("split_by", "model"))
         return C3VDDataset(**common_kwargs)
     if name == "simcol3d":
         common_kwargs["depth_max_mm"] = float(data_cfg.get("depth_max_mm", 200.0))

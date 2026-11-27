@@ -19,7 +19,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from src.datasets import build_dataset, make_synthetic_endoscopy_batch
+from src.datasets import build_dataset, make_synthetic_endoscopy_batch, summarize_records_by_sequence
 from src.eval import evaluate_loader
 from src.losses import build_loss_from_config
 from src.models import SmokeDepthNet, build_model
@@ -204,7 +204,13 @@ def run_training(
     train_ds = build_dataset(config, split="train")
     val_ds = build_dataset(config, split="val")
     test_ds = build_dataset(config, split="test")
+    split_sequences = {
+        "train": summarize_records_by_sequence(train_ds.records) if hasattr(train_ds, "records") else {},
+        "val": summarize_records_by_sequence(val_ds.records) if hasattr(val_ds, "records") else {},
+        "test": summarize_records_by_sequence(test_ds.records) if hasattr(test_ds, "records") else {},
+    }
     print(f"[Info] Dataset {data_cfg['dataset_name']} : train={len(train_ds)}, val={len(val_ds)}, test={len(test_ds)}")
+    print(f"[Info] Séquences par split : {split_sequences}")
 
     num_workers = 0 if device.type == "cpu" else int(data_cfg.get("num_workers", 2))
     batch_size = int(data_cfg.get("batch_size", 4))
@@ -429,6 +435,7 @@ def run_training(
         "seed": int(config.get("seed", 42)),
         "dataset": data_cfg["dataset_name"],
         "split": "test",
+        "split_sequences": split_sequences,
         "align_mode": align_mode,
         "best_val_abs_rel": round(best_val_abs_rel, 6),
         "trainable_params": trainable_params,
