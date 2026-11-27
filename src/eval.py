@@ -27,7 +27,7 @@ from src.datasets import (
     make_synthetic_endoscopy_batch,
     summarize_records_by_sequence,
 )
-from src.metrics import DepthMetricTracker
+from src.metrics import DepthMetricTracker, compute_macro_metrics
 from src.models import SmokeDepthNet, build_model
 from src.utils import (
     get_device,
@@ -186,16 +186,13 @@ def aggregate_ablation_results(
     variant_runs: dict[str, list[str]],
     align_mode: str = "median",
 ) -> dict[str, Any]:
-    """Agrège les JSON multi-graines (global et par séquence) pour le tableau d'ablation.
-
-    `variant_runs` associe un libellé de variante à la liste des noms de dossiers d'expérience
-    (ex. `{"baseline": ["c3vd_v3_baseline_seed42", "c3vd_v3_baseline_seed123", ...]}`).
-    """
+    """Agrège les JSON multi-graines (micro par image, macro par séquence, et détail par séquence)."""
     base = Path(results_dir)
     aggregated: dict[str, Any] = {}
 
     for label, exp_dirs in variant_runs.items():
         global_rows: list[dict[str, float]] = []
+        macro_rows: list[dict[str, float]] = []
         per_seq_rows: dict[str, list[dict[str, float]]] = {}
         used_exps: list[str] = []
 
@@ -208,8 +205,12 @@ def aggregate_ablation_results(
             used_exps.append(exp_dir_name)
             if "metrics" in payload:
                 global_rows.append(payload["metrics"])
-            for seq_name, seq_metrics in payload.get("per_sequence_metrics", {}).items():
+            per_seq_dict = payload.get("per_sequence_metrics", {})
+            for seq_name, seq_metrics in per_seq_dict.items():
                 per_seq_rows.setdefault(seq_name, []).append(seq_metrics)
+            macro = payload.get("macro_metrics") or compute_macro_metrics(per_seq_dict)
+            if macro:
+                macro_rows.append(macro)
 
         if not global_rows:
             continue
@@ -218,6 +219,7 @@ def aggregate_ablation_results(
             "num_seeds": len(global_rows),
             "experiments": used_exps,
             "overall": _summarize_metric_dicts(global_rows),
+            "macro": _summarize_metric_dicts(macro_rows),
             "per_sequence": {
                 seq: _summarize_metric_dicts(rows)
                 for seq, rows in sorted(per_seq_rows.items())
@@ -225,6 +227,115 @@ def aggregate_ablation_results(
         }
 
     return aggregated
+
+
+def compare_variants_per_sequence(
+    results_dir: str | Path,
+    baseline_runs: list[str],
+    contrib_runs: list[str],
+    align_mode: str = "median",
+) -> dict[str, Any]:
+    """Compare appariée graine-à-graine baseline vs contribution sur chaque séquence de test.
+
+    Calcule `delta = contrib - baseline` (négatif = meilleur pour AbsRel/SqRel/RMSE/RMSE_log/GradMAE ;
+    positif = meilleur pour delta_1..3) et compte sur combien de séquences la contribution gagne.
+    """
+    base = Path(results_dir)
+    higher_is_better = {"delta_1", "delta_2", "delta_3"}
+
+    paired_payloads: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for b_exp, c_exp in zip(baseline_runs, contrib_runs):
+        bp = base / b_exp / f"eval_test_{align_mode}.json"
+        cp = base / c_exp / f"eval_test_{align_mode}.json"
+        if not (bp.is_file() and cp.is_file()):
+            continue
+        with bp.open("r", encoding="utf-8") as fb, cp.open("r", encoding="utf-8") as fc:
+            paired_payloads.append((json.load(fb), json.load(fc)))
+
+    if not paired_payloads:
+        return {}
+
+    common_seqs = sorted(
+        set.intersection(
+            *(
+                set(b.get("per_sequence_metrics", {}).keys())
+                & set(c.get("per_sequence_metrics", {}).keys())
+                for b, c in paired_payloads
+            )
+        )
+    )
+
+    def _paired_block(pairs_list: list[tuple[dict[str, float], dict[str, float]]]) -> dict[str, Any]:
+        keys = [k for k in DepthMetricTracker.METRIC_KEYS if k in pairs_list[0][0] and k in pairs_list[0][1]]
+        out: dict[str, Any] = {}
+        for k in keys:
+            b_vals = [float(b[k]) for b, _ in pairs_list]
+            c_vals = [float(c[k]) for _, c in pairs_list]
+            diffs = [c_v - b_v for b_v, c_v in zip(b_vals, c_vals)]
+            n = len(diffs)
+            b_mean = sum(b_vals) / n
+            c_mean = sum(c_vals) / n
+            d_mean = sum(diffs) / n
+            if n > 1:
+                d_std: float | None = math.sqrt(sum((d - d_mean) ** 2 for d in diffs) / (n - 1))
+                d_fmt = f"{d_mean:+.4f} ± {d_std:.4f}"
+            else:
+                d_std = None
+                d_fmt = f"{d_mean:+.4f} (n=1)"
+            wins = (d_mean > 0.0) if k in higher_is_better else (d_mean < 0.0)
+            out[k] = {
+                "baseline_mean": round(b_mean, 6),
+                "contrib_mean": round(c_mean, 6),
+                "paired_diff_mean": round(d_mean, 6),
+                "paired_diff_std": round(d_std, 6) if d_std is not None else None,
+                "paired_diff_formatted": d_fmt,
+                "contrib_wins": wins,
+                "n_pairs": n,
+            }
+        return out
+
+    per_sequence: dict[str, Any] = {}
+    for seq in common_seqs:
+        seq_pairs = [
+            (b["per_sequence_metrics"][seq], c["per_sequence_metrics"][seq])
+            for b, c in paired_payloads
+        ]
+        per_sequence[seq] = _paired_block(seq_pairs)
+
+    win_summary: dict[str, Any] = {}
+    if common_seqs:
+        for k in DepthMetricTracker.METRIC_KEYS:
+            seq_entries = [per_sequence[s][k] for s in common_seqs if k in per_sequence[s]]
+            if not seq_entries:
+                continue
+            wins = sum(1 for e in seq_entries if e["contrib_wins"])
+            total_seq = len(seq_entries)
+            macro_diff = sum(e["paired_diff_mean"] for e in seq_entries) / total_seq
+            win_summary[k] = {
+                "contrib_wins_sequences": wins,
+                "total_sequences": total_seq,
+                "win_ratio_str": f"{wins}/{total_seq}",
+                "mean_paired_diff_across_sequences": round(macro_diff, 6),
+            }
+
+    micro_pairs = [(b.get("metrics", {}), c.get("metrics", {})) for b, c in paired_payloads]
+    macro_pairs = [
+        (
+            b.get("macro_metrics") or compute_macro_metrics(b.get("per_sequence_metrics", {})),
+            c.get("macro_metrics") or compute_macro_metrics(c.get("per_sequence_metrics", {})),
+        )
+        for b, c in paired_payloads
+    ]
+
+    return {
+        "num_paired_seeds": len(paired_payloads),
+        "baseline_experiments": [b.get("experiment_name") for b, _ in paired_payloads],
+        "contrib_experiments": [c.get("experiment_name") for _, c in paired_payloads],
+        "micro_paired": _paired_block(micro_pairs),
+        "macro_paired": _paired_block(macro_pairs) if all(m[0] and m[1] for m in macro_pairs) else {},
+        "per_sequence": per_sequence,
+        "sequence_win_summary": win_summary,
+    }
 
 
 def run_smoke_evaluation(
@@ -309,6 +420,7 @@ def run_evaluation(
         return_per_sequence=True,
     )
 
+    macro_metrics = compute_macro_metrics(per_sequence_metrics)
     exp_name = str(config.get("experiment_name", "eval_run"))
     exp_dir = Path(config["paths"]["results_dir"]) / exp_name
     payload = {
@@ -322,14 +434,17 @@ def run_evaluation(
         "pred_is_disparity": pred_is_disparity,
         "checkpoint": str(checkpoint_path) if checkpoint_path else None,
         "metrics": metrics,
+        "macro_metrics": macro_metrics,
         "per_sequence_metrics": per_sequence_metrics,
     }
     out_json = save_json(payload, exp_dir / f"eval_{split}_{align_mode}.json")
     save_config_copy(config, exp_dir / "config_used.yaml")
     print(f"[OK] Évaluation terminée -> {out_json}")
-    print(f"     Résultats : {metrics}")
+    print(f"     Moyenne par image (micro)    : {metrics}")
+    if macro_metrics:
+        print(f"     Moyenne par séquence (macro) : {macro_metrics}")
     if per_sequence_metrics:
-        print(f"     Par séquence : {per_sequence_metrics}")
+        print(f"     Par séquence                 : {per_sequence_metrics}")
     return payload
 
 
@@ -402,6 +517,7 @@ def evaluate_checkpoint_on_sequences(
         "overlapping_models": overlapping_models,
         "has_model_leakage": bool(overlapping_models),
         "metrics": metrics,
+        "macro_metrics": compute_macro_metrics(per_seq),
         "per_sequence_metrics": per_seq,
     }
 

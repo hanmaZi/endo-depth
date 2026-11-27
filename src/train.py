@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import math
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ from tqdm import tqdm
 from src.datasets import build_dataset, make_synthetic_endoscopy_batch, summarize_records_by_sequence
 from src.eval import evaluate_loader
 from src.losses import build_loss_from_config
+from src.metrics import compute_macro_metrics
 from src.models import SmokeDepthNet, build_model
 from src.utils import (
     count_parameters,
@@ -320,6 +322,7 @@ def run_training(
         return best_ckpt_path if best_ckpt_path.is_file() else last_ckpt_path
 
     for epoch in range(start_epoch, epochs + 1):
+        epoch_t0 = time.monotonic()
         model.train()
         running: dict[str, float] = {"total": 0.0, "l1": 0.0, "silog": 0.0, "grad": 0.0, "normal": 0.0}
         steps = 0
@@ -373,9 +376,11 @@ def run_training(
             max_depth=max_depth,
             max_batches=max_batches,
         )
+        epoch_sec = round(time.monotonic() - epoch_t0, 2)
 
         record = {
             "epoch": epoch,
+            "duration_sec": epoch_sec,
             "train_loss": train_losses,
             "val_metrics": val_metrics,
         }
@@ -389,7 +394,7 @@ def run_training(
             f"grad={train_losses['grad']:.3f}, norm={train_losses['normal']:.3f}) | "
             f"val_AbsRel={val_abs_rel:.4f}, val_RMSE={val_metrics.get('rmse', 0.0):.3f}, "
             f"val_GradMAE={val_metrics.get('grad_mae', 0.0):.3f}, "
-            f"val_d1={val_metrics.get('delta_1', 0.0):.4f}"
+            f"val_d1={val_metrics.get('delta_1', 0.0):.4f} | {epoch_sec:.1f}s"
         )
 
         if scheduler is not None:
@@ -417,6 +422,7 @@ def run_training(
             )
 
     # Évaluation finale sur le split test avec le meilleur checkpoint
+    eval_t0 = time.monotonic()
     if best_ckpt_path.is_file():
         load_checkpoint(best_ckpt_path, model=model, device=device)
     test_metrics, per_sequence_metrics = evaluate_loader(
@@ -430,6 +436,11 @@ def run_training(
         max_batches=max_batches,
         return_per_sequence=True,
     )
+    eval_duration_sec = round(time.monotonic() - eval_t0, 2)
+    macro_metrics = compute_macro_metrics(per_sequence_metrics)
+    total_train_sec = round(sum(float(h.get("duration_sec", 0.0)) for h in history), 2)
+    device_name = torch.cuda.get_device_name(0) if device.type == "cuda" else "cpu"
+
     test_payload = {
         "experiment_name": exp_name,
         "seed": int(config.get("seed", 42)),
@@ -437,16 +448,23 @@ def run_training(
         "split": "test",
         "split_sequences": split_sequences,
         "align_mode": align_mode,
+        "device_name": device_name,
+        "training_duration_sec": total_train_sec,
+        "eval_duration_sec": eval_duration_sec,
         "best_val_abs_rel": round(best_val_abs_rel, 6),
         "trainable_params": trainable_params,
         "total_params": total_params,
         "metrics": test_metrics,
+        "macro_metrics": macro_metrics,
         "per_sequence_metrics": per_sequence_metrics,
     }
     save_json(test_payload, exp_dir / f"eval_test_{align_mode}.json")
-    print(f"[OK] Entraînement terminé. Test final : {test_metrics}")
+    print(f"[OK] Entraînement terminé ({total_train_sec:.1f}s = {total_train_sec / 60.0:.2f} min sur {device_name}).")
+    print(f"     Moyenne par image (micro)   : {test_metrics}")
+    if macro_metrics:
+        print(f"     Moyenne par séquence (macro): {macro_metrics}")
     if per_sequence_metrics:
-        print(f"[OK] Résultats par séquence (test) : {per_sequence_metrics}")
+        print(f"     Par séquence (test)         : {per_sequence_metrics}")
     return best_ckpt_path if best_ckpt_path.is_file() else last_ckpt_path
 
 

@@ -203,7 +203,7 @@ class DepthMetricTracker:
                 self.seq_counts[seq] += 1
 
     def compute(self) -> dict[str, float]:
-        """Retourne la moyenne de chaque métrique sur toutes les images évaluées."""
+        """Retourne la moyenne de chaque métrique sur toutes les images évaluées (micro)."""
         if self.count == 0:
             return {k: 0.0 for k in self.METRIC_KEYS}
         return {k: round(self.sums[k] / self.count, 6) for k in self.METRIC_KEYS}
@@ -219,3 +219,24 @@ class DepthMetricTracker:
             seq_metrics["num_evaluated_frames"] = float(cnt)
             out[seq] = seq_metrics
         return out
+
+    def compute_macro(self) -> dict[str, float]:
+        """Retourne la moyenne des moyennes par séquence (macro, chaque séquence pèse autant)."""
+        return compute_macro_metrics(self.compute_per_sequence())
+
+
+def compute_macro_metrics(per_sequence_metrics: dict[str, dict[str, float]]) -> dict[str, float]:
+    """Calcule la moyenne non pondérée (macro) sur les séquences évaluées."""
+    seq_rows = [row for row in per_sequence_metrics.values() if row]
+    if not seq_rows:
+        return {}
+    out: dict[str, float] = {}
+    for key in DepthMetricTracker.METRIC_KEYS:
+        vals = [float(row[key]) for row in seq_rows if key in row]
+        if vals:
+            out[key] = round(sum(vals) / len(vals), 6)
+    out["num_evaluated_sequences"] = float(len(seq_rows))
+    out["num_evaluated_frames"] = float(
+        sum(float(row.get("num_evaluated_frames", 0.0)) for row in seq_rows)
+    )
+    return out
